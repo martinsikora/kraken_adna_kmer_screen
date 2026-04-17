@@ -324,14 +324,6 @@ clumped relative to expectation.
 
 ---
 
-## Citation
-
-If you use this workflow, please cite:
-
-> [manuscript in preparation]
-
----
-
 ## License
 
 MIT — see [LICENSE](LICENSE).
