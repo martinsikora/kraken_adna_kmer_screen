@@ -107,10 +107,15 @@ The workflow also requires pre-built taxonomy membership files:
 These are TSV files (gzip-compressed) with columns:
 
 ```
-tax_rank    tax_id    tax_name    tax_ids_descendant
-species     632       Yersinia pestis    632,214092,349746
+tax_rank    tax_id    tax_name           tax_ids_descendant
+species     632       Yersinia pestis    632
+species     632       Yersinia pestis    214092
+species     632       Yersinia pestis    349746
 ...
 ```
+
+Each descendant taxid occupies its own row; a species/genus entry is repeated once per
+descendant strain or assembly taxid.
 
 They are typically generated alongside the KrakenUniq database from the NCBI taxonomy
 dump using the companion `build_taxlists` utility (not included here). See
