@@ -19,8 +19,6 @@ import sys
 from pathlib import Path
 import pandas as pd
 
-configfile: "config/config.yaml"
-
 # ---------------------------------------------------------------------------
 # Load sample / unit manifest
 # ---------------------------------------------------------------------------
@@ -36,8 +34,8 @@ SAMPLES      = units["sample_id"].unique().tolist()
 SAMPLE_UNITS = units.groupby("sample_id")["unit_id"].apply(list).to_dict()
 UNIT_INFO    = units.set_index("unit_id")
 
-# Scripts directory (for sys.path injection)
-SCRIPTS_DIR = str(Path(workflow.basedir) / "scripts")
+# Scripts directory (resolved relative to workflow/ dir)
+SCRIPTS_DIR = str(Path(workflow.basedir).parent / "scripts")
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +336,6 @@ rule aggregate_all:
 
 # ---------------------------------------------------------------------------
 # Rule: plot_damage (optional — triggered by rule `plots`)
-# Uses existing plotting scripts from the kraken_kmer_dmg prototype.
 # ---------------------------------------------------------------------------
 
 rule plot_damage:

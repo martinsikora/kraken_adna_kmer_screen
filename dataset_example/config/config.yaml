@@ -18,12 +18,12 @@ reference_dir: /path/to/krakendb/kraken_adna_kmer_screen_db
 # Generated alongside the KrakenUniq database; see docs/database_setup.md.
 # These must be gzip-compressed TSV files with columns:
 #   tax_rank, tax_id, tax_name, tax_ids_descendant
-# Example (uncompressed format): example/species.tax_ids.tsv
-species_taxids: inputs/species.tax_ids.tsv.gz
-genus_taxids:   inputs/genus.tax_ids.tsv.gz
+# Example (uncompressed format): species.tax_ids.tsv, genus.tax_ids.tsv
+species_taxids: /path/to/species.tax_ids.tsv.gz
+genus_taxids:   /path/to/genus.tax_ids.tsv.gz
 
-# Sample/unit manifest (see example/units.tsv for format)
-units_tsv: inputs/units.tsv
+# Sample/unit manifest (see units.tsv for format)
+units_tsv: config/units.tsv
 
 # Taxids to exclude when vectorizing samples.
 # Defaults: 0=unclassified, 1=root, 2=Bacteria domain, 131567=cellular organisms
@@ -45,9 +45,10 @@ min_genus_relative_abundance: 0.0  # genus RA threshold before within-genus fit
 # - target_genus: inline list of genus names or taxids. Empty = fit all genera.
 # - target_genus_file: path to a plain text file, one name/taxid per line,
 #   # comments stripped. Empty string = disabled.
-# Both are merged at runtime. See inputs/genera_*.txt for pre-built lists.
+# Both are merged at runtime. See inputs/genera_*.txt in the workflow repo
+# for pre-built lists (reference with absolute paths).
 target_genus: []
-target_genus_file: ""   # e.g. inputs/genera_all.txt
+target_genus_file: ""   # e.g. /path/to/kraken_adna_kmer_screen/inputs/genera_all.txt
 
 # If true, also drop sample features whose reference taxids do not map to any
 # target genus. Sharpens species discrimination when target genera are known.
