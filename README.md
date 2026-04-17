@@ -39,6 +39,28 @@ Per sample (auto):
 
 ---
 
+## Repository structure
+
+```
+kraken_adna_kmer_screen/
+├── run_dataset.sh          # local runner
+├── run_dataset_slurm.sh    # SLURM runner
+├── workflow/
+│   └── Snakefile
+├── scripts/                # Python analysis scripts
+├── inputs/                 # pre-built genus filter lists
+└── dataset_example/        # template dataset directory
+    └── config/
+        ├── config.yaml     # workflow configuration
+        └── units.tsv       # sample/unit manifest
+```
+
+Each dataset you analyse lives in its own directory (e.g. `cgg_2/014/`) with the same
+`config/` layout as `dataset_example/`. The `workflow/`, `scripts/`, and `inputs/`
+directories are shared across all datasets.
+
+---
+
 ## Requirements
 
 | Dependency | Tested version |
@@ -68,6 +90,20 @@ git clone https://github.com/<org>/kraken_adna_kmer_screen.git
 cd kraken_adna_kmer_screen
 ```
 
+To use a shared deployment, symlink `workflow/`, `scripts/`, `inputs/`, and the runner
+scripts into a shared directory so all datasets can share a single copy of the workflow:
+
+```bash
+DEPLOY=/path/to/shared/kraken_adna_kmer_screen
+REPO=/path/to/kraken_adna_kmer_screen
+mkdir -p "$DEPLOY/workflow"
+ln -s "$REPO/workflow/Snakefile"       "$DEPLOY/workflow/Snakefile"
+ln -s "$REPO/scripts"                  "$DEPLOY/scripts"
+ln -s "$REPO/inputs"                   "$DEPLOY/inputs"
+ln -s "$REPO/run_dataset.sh"           "$DEPLOY/run_dataset.sh"
+ln -s "$REPO/run_dataset_slurm.sh"     "$DEPLOY/run_dataset_slurm.sh"
+```
+
 ---
 
 ## Database setup (run once per KrakenUniq database)
@@ -95,7 +131,8 @@ This writes five files to the `--out-prefix` directory:
 | `reference.features.tsv` | Column metadata (feature index, taxid) |
 | `reference.summary.tsv` | Build diagnostics |
 
-Set `reference_dir` in `config/config.yaml` to the directory containing these files.
+Set `reference_dir` in your dataset's `config/config.yaml` to the directory containing
+these files.
 
 ### Taxonomy membership files
 
@@ -119,7 +156,8 @@ descendant strain or assembly taxid.
 
 They are typically generated alongside the KrakenUniq database from the NCBI taxonomy
 dump using the companion `build_taxlists` utility (not included here). See
-`example/species.tax_ids.tsv` and `example/genus.tax_ids.tsv` for the expected format.
+`dataset_example/species.tax_ids.tsv` and `dataset_example/genus.tax_ids.tsv` for the
+expected format.
 
 ---
 
@@ -128,7 +166,7 @@ dump using the companion `build_taxlists` utility (not included here). See
 ### 1. Sample/unit manifest (`units.tsv`)
 
 A tab-separated file listing every sequencing unit (lane) to process.
-Copy `example/units.tsv` as a starting point.
+Copy `dataset_example/config/units.tsv` as a starting point.
 
 | Column | Description |
 |---|---|
@@ -142,8 +180,8 @@ error on startup if duplicates are detected.
 
 ### 2. Taxonomy files
 
-Place `species.tax_ids.tsv.gz` and `genus.tax_ids.tsv.gz` in the `inputs/` directory
-(or update the paths in `config/config.yaml`).
+Set the absolute paths to `species.tax_ids.tsv.gz` and `genus.tax_ids.tsv.gz` in
+`config/config.yaml` (`species_taxids` and `genus_taxids` keys).
 
 ### 3. Target genus filter (optional)
 
@@ -159,7 +197,8 @@ with one genus name or taxid per line (lines starting with `#` are ignored):
 
 Pre-built lists covering bacteria (`genera_bacteria.txt`), viruses (`genera_virus.txt`),
 and eukaryotes (`genera_eukaryota.txt`) are included in `inputs/`. A combined list of
-all genera is in `inputs/genera_all.txt`.
+all genera is in `inputs/genera_all.txt`. Reference these with absolute paths in
+`config/config.yaml`.
 
 Set `target_genus_file` in `config/config.yaml` to the desired list path, or leave it
 empty (`""`) to fit all genera present in the reference.
@@ -168,7 +207,8 @@ empty (`""`) to fit all genera present in the reference.
 
 ## Configuration
 
-Edit `config/config.yaml` before running. Key parameters:
+Copy `dataset_example/config/config.yaml` into your dataset directory and edit it.
+Key parameters:
 
 ### Paths
 
@@ -219,21 +259,27 @@ criteria are met:
 
 ## Running the workflow
 
+Run from the workflow root directory (where `run_dataset.sh` lives), passing the path
+to your dataset directory as the first argument.
+
 ```bash
-# Local run (all samples + damage plots)
-snakemake --cores 32 --resources mem_mb=64000
+# Local run
+bash run_dataset.sh my_dataset
 
-# Dry-run to preview jobs without executing
-snakemake -n
+# Dry-run to preview jobs
+bash run_dataset.sh my_dataset --dry-run
 
-# Resume after a partial run
-snakemake --cores 32 --rerun-incomplete
+# Pass extra Snakemake options after --
+bash run_dataset.sh my_dataset -- --cores 32 --rerun-incomplete
 
-# Cluster submission (SLURM example)
-snakemake --cores 200 \
-    --executor slurm \
-    --default-resources slurm_account=<account> slurm_partition=<partition>
+# SLURM submission
+bash run_dataset_slurm.sh my_dataset
+bash run_dataset_slurm.sh my_dataset --jobs 50 --partition highmem
+bash run_dataset_slurm.sh my_dataset --dry-run
+bash run_dataset_slurm.sh my_dataset --unlock   # after a failed run
 ```
+
+Use `-h` / `--help` for the full option list of either runner script.
 
 All six summary tables and per-sample damage PDFs are built by the default `all` target.
 
