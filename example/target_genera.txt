@@ -1,0 +1,12 @@
+# Example target genus list — one genus taxid or name per line
+# Lines starting with # are ignored at runtime
+629
+1763
+157
+1279
+1301
+1386
+234
+590
+138
+662

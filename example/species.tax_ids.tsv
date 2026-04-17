@@ -1,0 +1,21 @@
+tax_rank	tax_id	tax_name	tax_ids_descendant
+species	632	Yersinia pestis	632,214092,349746
+species	1773	Mycobacterium tuberculosis	1773,83332,186490
+species	160	Treponema pallidum	160,243276,1155773
+species	1280	Staphylococcus aureus	1280,93061,367830
+species	1314	Streptococcus pyogenes	1314,160490,1041826
+species	1392	Bacillus anthracis	1392,198094,260799
+species	29459	Brucella melitensis	29459,224914,546272
+species	28901	Salmonella enterica	28901,99287,149539
+species	139	Borrelia burgdorferi	139,224326,1280917
+species	666	Vibrio cholerae	666,243277,345073
+species	1502	Clostridium perfringens	1502,195102,441771
+species	1639	Listeria monocytogenes	1639,169963,1538558
+species	263	Francisella tularensis	263,177416,393011
+species	38323	Bartonella henselae	38323,216270,1002809
+species	197	Campylobacter jejuni	197,192222,407148
+species	210	Helicobacter pylori	210,85962,1163742
+species	487	Neisseria meningitidis	487,122586,1093533
+species	520	Bordetella pertussis	520,257313,1299986
+species	781	Rickettsia prowazekii	781,272947,1105098
+species	33803	Ehrlichia chaffeensis	33803,205920,1282381

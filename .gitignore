@@ -1,0 +1,22 @@
+results/
+logs/
+.snakemake/
+__pycache__/
+*.pyc
+*.pyo
+*.npz
+*.pdf
+*.egg-info/
+.eggs/
+
+# User-supplied input files (paths are site-specific)
+inputs/units.tsv
+inputs/*.tsv.gz
+inputs/*.gz
+
+# IDE / OS
+.DS_Store
+.vscode/
+*.swp
+*~
+.codex

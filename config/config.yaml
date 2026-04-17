@@ -1,0 +1,103 @@
+# ---------------------------------------------------------------------------
+# kraken_adna_kmer_screen — workflow configuration
+# ---------------------------------------------------------------------------
+
+# Pre-built reference matrix directory.
+# Build once per KrakenUniq database with:
+#   python scripts/build_reference_matrix.py \
+#       --db-tsv   <krakendb>/database.kraken.tsv \
+#       --seqid-map <krakendb>/seqid2taxid.map \
+#       --species-taxids inputs/species.tax_ids.tsv.gz \
+#       --out-prefix <output_dir>/reference
+# The directory must contain:
+#   reference.matrix.npz, reference.matrix.csc.npz,
+#   reference.species.tsv, reference.features.tsv, reference.summary.tsv
+reference_dir: /path/to/krakendb/kraken_adna_kmer_screen_db
+
+# Taxonomy membership files for species and genus-level mapping.
+# Generated alongside the KrakenUniq database; see docs/database_setup.md.
+# These must be gzip-compressed TSV files with columns:
+#   tax_rank, tax_id, tax_name, tax_ids_descendant
+# Example (uncompressed format): example/species.tax_ids.tsv
+species_taxids: inputs/species.tax_ids.tsv.gz
+genus_taxids:   inputs/genus.tax_ids.tsv.gz
+
+# Sample/unit manifest (see example/units.tsv for format)
+units_tsv: inputs/units.tsv
+
+# Taxids to exclude when vectorizing samples.
+# Defaults: 0=unclassified, 1=root, 2=Bacteria domain, 131567=cellular organisms
+exclude_taxids: [0, 1, 2, 131567]
+
+# ---------------------------------------------------------------------------
+# NNLS abundance fitting
+# ---------------------------------------------------------------------------
+fit_mode:        fast    # exact | fast  (fast uses a two-pass candidate pruning)
+fit_granularity: genus   # species | genus | within-genus
+fit_constraint:  nnls    # nnls | simplex
+max_candidates:  1024    # maximum species candidates per genus (fast mode)
+max_feature_support: 0   # drop features present in > this many species (0=disabled)
+min_genus_relative_abundance: 0.0  # genus RA threshold before within-genus fit
+
+# Target genus filter (optional).
+# Restrict abundance fitting to specific genera. Useful when the target taxon
+# set is known (e.g. bacteria only, specific pathogen panel).
+# - target_genus: inline list of genus names or taxids. Empty = fit all genera.
+# - target_genus_file: path to a plain text file, one name/taxid per line,
+#   # comments stripped. Empty string = disabled.
+# Both are merged at runtime. See inputs/genera_*.txt for pre-built lists.
+target_genus: []
+target_genus_file: ""   # e.g. inputs/genera_all.txt
+
+# If true, also drop sample features whose reference taxids do not map to any
+# target genus. Sharpens species discrimination when target genera are known.
+# Requires target_genus / target_genus_file to be non-empty.
+restrict_to_target_genus_features: false
+
+# ---------------------------------------------------------------------------
+# aDNA damage profiling
+# ---------------------------------------------------------------------------
+damage_max_pos:              25    # positions from read end to profile
+damage_min_reads:            100   # minimum reads to compute damage stats for a taxon
+damage_n_bins:               50    # bins for fractional-position profiles
+damage_adaptive_plateau:     true  # auto-detect plateau window per taxon
+damage_plateau_search_start: 3     # search window start (positions from end)
+damage_plateau_search_end:   10    # search window end
+damage_min_plateau_window:   3     # minimum plateau width
+damage_plateau_noise_factor: 2.0   # allowed noise multiple above plateau mean
+
+# Read-length strata for fractional damage profiles (lo-hi bp)
+damage_strata: ["31-40", "41-55", "56-75", "76-100"]
+
+# Minimum baseline classified rate for annotating taxa in the summary plot
+# (1 - plateau_frac_unclassified). Range 0–1; default 0.6.
+damage_annotate_min_classified: 0.6
+
+# ---------------------------------------------------------------------------
+# Coverage evenness
+# ---------------------------------------------------------------------------
+evenness_min_reads: 50             # minimum reads to compute evenness
+evenness_ranks: [species, genus]   # taxonomic ranks to report
+
+# ---------------------------------------------------------------------------
+# Summary / hit table thresholds
+# ---------------------------------------------------------------------------
+summary_min_abundance:    0.0001   # minimum relative abundance to include in summary
+summary_min_damage_reads: 100      # minimum reads for damage stats in summary
+
+# All three criteria must be satisfied for a species to appear in the hit table
+hit_max_damage_pvalue:   0.05   # damage_pvalue < threshold
+hit_min_evenness:        0.5    # evenness_index > threshold
+hit_min_within_genus_ra: 0.1    # within_genus_relative_abundance >= threshold
+
+# ---------------------------------------------------------------------------
+# Compute resources (mem_mb: MB RAM; runtime: minutes)
+# Adjust for your cluster / scheduler.
+# ---------------------------------------------------------------------------
+resources:
+  screen_unit:       {mem_mb: 4000,  runtime: 60}
+  aggregate_sample:  {mem_mb: 8000,  runtime: 20}
+  fit_abundance:     {mem_mb: 16000, runtime: 30}
+  coverage_evenness: {mem_mb: 2000,  runtime: 10}
+  aggregate_all:     {mem_mb: 8000,  runtime: 20}
+  plot_damage:       {mem_mb: 4000,  runtime: 20}

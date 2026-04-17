@@ -1,0 +1,391 @@
+"""
+Snakefile — kraken_adna_kmer_screen workflow
+
+Screens ancient DNA samples for pathogen/species presence using KrakenUniq
+classification output. For each sample:
+  1. Single-pass vectorisation + damage accumulation (per lane)
+  2. Multi-lane aggregation
+  3. NNLS species abundance fitting
+  4. Coverage evenness from KrakenUniq reports
+  5. Cross-sample summary tables
+  6. (Optional) Per-sample damage visualisation PDFs
+
+Usage:
+  snakemake --cores 32 --resources mem_mb=64000
+  snakemake plots --cores 32         # include damage plots
+"""
+
+import sys
+from pathlib import Path
+import pandas as pd
+
+configfile: "config/config.yaml"
+
+# ---------------------------------------------------------------------------
+# Load sample / unit manifest
+# ---------------------------------------------------------------------------
+
+units = pd.read_csv(config["units_tsv"], sep="\t")
+units.columns = units.columns.str.strip()
+
+if units["unit_id"].duplicated().any():
+    dups = units.loc[units["unit_id"].duplicated(keep=False), "unit_id"].tolist()
+    raise ValueError(f"Duplicate unit_ids in {config['units_tsv']}: {dups}")
+
+SAMPLES      = units["sample_id"].unique().tolist()
+SAMPLE_UNITS = units.groupby("sample_id")["unit_id"].apply(list).to_dict()
+UNIT_INFO    = units.set_index("unit_id")
+
+# Scripts directory (for sys.path injection)
+SCRIPTS_DIR = str(Path(workflow.basedir) / "scripts")
+
+
+# ---------------------------------------------------------------------------
+# Helper lambdas
+# ---------------------------------------------------------------------------
+
+def get_unit_class(wildcards):
+    return UNIT_INFO.loc[wildcards.unit_id, "kraken_class"]
+
+def get_unit_reports(wildcards):
+    """All kraken_report paths for a sample."""
+    mask = units["sample_id"] == wildcards.sample_id
+    return units.loc[mask, "kraken_report"].tolist()
+
+def get_sample_vectors(wildcards):
+    return expand(
+        "results/units/{sample_id}/{unit_id}.vector.npz",
+        sample_id=wildcards.sample_id,
+        unit_id=SAMPLE_UNITS[wildcards.sample_id],
+    )
+
+def get_sample_damage_arrays(wildcards):
+    return expand(
+        "results/units/{sample_id}/{unit_id}.damage_arrays.npz",
+        sample_id=wildcards.sample_id,
+        unit_id=SAMPLE_UNITS[wildcards.sample_id],
+    )
+
+def damage_strata_args(wc=None):
+    return [str(s) for s in config["damage_strata"]]
+
+def evenness_rank_args(wc=None):
+    return [str(r) for r in config["evenness_ranks"]]
+
+def target_genus_tokens(wc=None):
+    """Build repeated --target-genus tokens from config list."""
+    genera = config.get("target_genus", [])
+    tokens = []
+    for genus in genera:
+        tokens.extend(["--target-genus", str(genus)])
+    return tokens
+
+def target_genus_file_tokens(wc=None):
+    """Return --target-genus-file tokens if a file path is set in config."""
+    path = config.get("target_genus_file", "")
+    return ["--target-genus-file", str(path)] if path else []
+
+def restrict_genus_features_tokens(wc=None):
+    """Return --restrict-to-target-genus-features token if enabled in config."""
+    if config.get("restrict_to_target_genus_features", False):
+        return ["--restrict-to-target-genus-features"]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Default target
+# ---------------------------------------------------------------------------
+
+rule all:
+    input:
+        "results/summary/all_samples.abundance.tsv",
+        "results/summary/all_samples.damage.tsv",
+        "results/summary/all_samples.coverage.tsv",
+        "results/summary/all_samples.species.tsv",
+        "results/summary/all_samples.hits.tsv",
+        "results/summary/all_samples.summary.tsv",
+        expand(
+            [
+                "results/samples/{sample_id}/{sample_id}.damage_profile.pdf",
+                "results/samples/{sample_id}/{sample_id}.damage_summary.pdf",
+                "results/samples/{sample_id}/{sample_id}.damage_fractional.pdf",
+            ],
+            sample_id=SAMPLES,
+        ),
+
+
+# ---------------------------------------------------------------------------
+# Rule: screen_unit
+# Single-pass through one classified lane file.
+# Outputs are temp() by default to save disk at scale.
+# ---------------------------------------------------------------------------
+
+rule screen_unit:
+    input:
+        kraken_class   = get_unit_class,
+        features       = config["reference_dir"] + "/reference.features.tsv",
+        species_taxids = config["species_taxids"],
+    output:
+        vector        = temp("results/units/{sample_id}/{unit_id}.vector.npz"),
+        damage_arrays = temp("results/units/{sample_id}/{unit_id}.damage_arrays.npz"),
+        summary       = "results/units/{sample_id}/{unit_id}.summary.tsv",
+    params:
+        exclude_taxids = [str(t) for t in config["exclude_taxids"]],
+        max_pos        = config["damage_max_pos"],
+        n_bins         = config["damage_n_bins"],
+        strata         = damage_strata_args(),
+    resources:
+        mem_mb   = config["resources"]["screen_unit"]["mem_mb"],
+        runtime  = config["resources"]["screen_unit"]["runtime"],
+    log:
+        "logs/units/{sample_id}/{unit_id}.screen_unit.log"
+    shell:
+        """
+        PYTHONPATH="{SCRIPTS_DIR}" python "{SCRIPTS_DIR}/screen_unit.py" \
+            --kraken-class       {input.kraken_class:q} \
+            --reference-features {input.features:q} \
+            --species-taxids     {input.species_taxids:q} \
+            --out-vector         {output.vector:q} \
+            --out-damage-arrays  {output.damage_arrays:q} \
+            --out-summary        {output.summary:q} \
+            --exclude-taxids     {params.exclude_taxids:q} \
+            --max-pos            {params.max_pos} \
+            --n-bins             {params.n_bins} \
+            --strata             {params.strata:q} \
+            > {log:q} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Rule: aggregate_sample
+# Merge per-unit vectors + damage arrays; compute final damage stats.
+# ---------------------------------------------------------------------------
+
+rule aggregate_sample:
+    input:
+        vectors       = get_sample_vectors,
+        damage_arrays = get_sample_damage_arrays,
+    output:
+        vector            = "results/samples/{sample_id}/{sample_id}.vector.npz",
+        damage_profile    = "results/samples/{sample_id}/{sample_id}.damage_profile.tsv",
+        damage_stats      = "results/samples/{sample_id}/{sample_id}.damage_stats.tsv",
+        damage_global     = "results/samples/{sample_id}/{sample_id}.damage_global.tsv",
+        damage_frac       = "results/samples/{sample_id}/{sample_id}.damage_fractional_profile.tsv",
+    params:
+        out_damage_prefix      = "results/samples/{sample_id}/{sample_id}",
+        min_reads              = config["damage_min_reads"],
+        plateau_search_start   = config["damage_plateau_search_start"],
+        plateau_search_end     = config["damage_plateau_search_end"],
+        min_plateau_window     = config["damage_min_plateau_window"],
+        plateau_noise_factor   = config["damage_plateau_noise_factor"],
+        adaptive_flag          = "--adaptive-plateau" if config["damage_adaptive_plateau"] else "--no-adaptive-plateau",
+    resources:
+        mem_mb   = config["resources"]["aggregate_sample"]["mem_mb"],
+        runtime  = config["resources"]["aggregate_sample"]["runtime"],
+    log:
+        "logs/samples/{sample_id}.aggregate_sample.log"
+    shell:
+        """
+        PYTHONPATH="{SCRIPTS_DIR}" python "{SCRIPTS_DIR}/aggregate_sample.py" \
+            --vectors       {input.vectors:q} \
+            --damage-arrays {input.damage_arrays:q} \
+            --out-vector    {output.vector:q} \
+            --out-damage-prefix {params.out_damage_prefix:q} \
+            --min-reads     {params.min_reads} \
+            {params.adaptive_flag:q} \
+            --plateau-search-start {params.plateau_search_start} \
+            --plateau-search-end   {params.plateau_search_end} \
+            --min-plateau-window   {params.min_plateau_window} \
+            --plateau-noise-factor {params.plateau_noise_factor} \
+            > {log:q} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Rule: fit_abundance
+# NNLS species/genus abundance estimation.
+# ---------------------------------------------------------------------------
+
+rule fit_abundance:
+    input:
+        vector           = "results/samples/{sample_id}/{sample_id}.vector.npz",
+        matrix           = config["reference_dir"] + "/reference.matrix.npz",
+        matrix_csc       = config["reference_dir"] + "/reference.matrix.csc.npz",
+        species_metadata = config["reference_dir"] + "/reference.species.tsv",
+        features         = config["reference_dir"] + "/reference.features.tsv",
+        genus_taxids     = config["genus_taxids"],
+    output:
+        abundance = "results/samples/{sample_id}/{sample_id}.abundance.tsv",
+        fit       = "results/samples/{sample_id}/{sample_id}.fit.tsv",
+        genus     = "results/samples/{sample_id}/{sample_id}.genus.tsv",
+    params:
+        out_prefix    = "results/samples/{sample_id}/{sample_id}",
+        fit_mode      = config["fit_mode"],
+        fit_constraint = config["fit_constraint"],
+        fit_granularity = config["fit_granularity"],
+        max_candidates  = config["max_candidates"],
+        max_feature_support = config["max_feature_support"],
+        min_genus_ra    = config["min_genus_relative_abundance"],
+        target_genus_tokens        = target_genus_tokens(),
+        target_genus_file_tokens   = target_genus_file_tokens(),
+        restrict_genus_feat_tokens = restrict_genus_features_tokens(),
+    resources:
+        mem_mb   = config["resources"]["fit_abundance"]["mem_mb"],
+        runtime  = config["resources"]["fit_abundance"]["runtime"],
+    log:
+        "logs/samples/{sample_id}.fit_abundance.log"
+    shell:
+        """
+        PYTHONPATH="{SCRIPTS_DIR}" python "{SCRIPTS_DIR}/fit_nnls.py" \
+            --reference-matrix   {input.matrix:q} \
+            --species-metadata   {input.species_metadata:q} \
+            --sample-vector      {input.vector:q} \
+            --reference-features {input.features:q} \
+            --genus-taxids       {input.genus_taxids:q} \
+            --out-prefix         {params.out_prefix:q} \
+            --fit-mode           {params.fit_mode:q} \
+            --fit-constraint     {params.fit_constraint:q} \
+            --fit-granularity    {params.fit_granularity:q} \
+            --max-candidates     {params.max_candidates} \
+            --max-feature-support {params.max_feature_support} \
+            --min-genus-relative-abundance {params.min_genus_ra} \
+            {params.target_genus_tokens:q} \
+            {params.target_genus_file_tokens:q} \
+            {params.restrict_genus_feat_tokens:q} \
+            > {log:q} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Rule: coverage_evenness
+# Parse KrakenUniq reports; compute per-taxon evenness index.
+# ---------------------------------------------------------------------------
+
+rule coverage_evenness:
+    input:
+        reports = get_unit_reports,
+    output:
+        coverage = "results/samples/{sample_id}/{sample_id}.coverage.tsv",
+    params:
+        sample_id  = "{sample_id}",
+        min_reads  = config["evenness_min_reads"],
+        ranks      = evenness_rank_args(),
+    resources:
+        mem_mb   = config["resources"]["coverage_evenness"]["mem_mb"],
+        runtime  = config["resources"]["coverage_evenness"]["runtime"],
+    log:
+        "logs/samples/{sample_id}.coverage_evenness.log"
+    shell:
+        """
+        PYTHONPATH="{SCRIPTS_DIR}" python "{SCRIPTS_DIR}/coverage_evenness.py" \
+            --reports    {input.reports:q} \
+            --out-coverage {output.coverage:q} \
+            --sample-id  {params.sample_id:q} \
+            --min-reads  {params.min_reads} \
+            --ranks      {params.ranks:q} \
+            > {log:q} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Rule: aggregate_all
+# Concatenate per-sample results into workflow-level summary tables.
+# ---------------------------------------------------------------------------
+
+rule aggregate_all:
+    input:
+        abundance     = expand("results/samples/{sample_id}/{sample_id}.abundance.tsv", sample_id=SAMPLES),
+        damage        = expand("results/samples/{sample_id}/{sample_id}.damage_global.tsv", sample_id=SAMPLES),
+        damage_stats  = expand("results/samples/{sample_id}/{sample_id}.damage_stats.tsv", sample_id=SAMPLES),
+        coverage      = expand("results/samples/{sample_id}/{sample_id}.coverage.tsv", sample_id=SAMPLES),
+        fit           = expand("results/samples/{sample_id}/{sample_id}.fit.tsv", sample_id=SAMPLES),
+    output:
+        abundance = "results/summary/all_samples.abundance.tsv",
+        damage    = "results/summary/all_samples.damage.tsv",
+        coverage  = "results/summary/all_samples.coverage.tsv",
+        species   = "results/summary/all_samples.species.tsv",
+        hits      = "results/summary/all_samples.hits.tsv",
+        summary   = "results/summary/all_samples.summary.tsv",
+    params:
+        out_dir              = "results/summary",
+        min_abundance        = config["summary_min_abundance"],
+        min_damage_reads     = config["summary_min_damage_reads"],
+        hit_max_damage_pvalue   = config["hit_max_damage_pvalue"],
+        hit_min_evenness        = config["hit_min_evenness"],
+        hit_min_within_genus_ra = config["hit_min_within_genus_ra"],
+    resources:
+        mem_mb   = config["resources"]["aggregate_all"]["mem_mb"],
+        runtime  = config["resources"]["aggregate_all"]["runtime"],
+    log:
+        "logs/aggregate_all.log"
+    shell:
+        """
+        PYTHONPATH="{SCRIPTS_DIR}" python "{SCRIPTS_DIR}/aggregate_all.py" \
+            --abundance      {input.abundance:q} \
+            --damage         {input.damage:q} \
+            --damage-stats   {input.damage_stats:q} \
+            --coverage       {input.coverage:q} \
+            --fit            {input.fit:q} \
+            --out-dir    {params.out_dir:q} \
+            --min-abundance    {params.min_abundance} \
+            --min-damage-reads {params.min_damage_reads} \
+            --hit-max-damage-pvalue   {params.hit_max_damage_pvalue} \
+            --hit-min-evenness        {params.hit_min_evenness} \
+            --hit-min-within-genus-ra {params.hit_min_within_genus_ra} \
+            > {log:q} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Rule: plot_damage (optional — triggered by rule `plots`)
+# Uses existing plotting scripts from the kraken_kmer_dmg prototype.
+# ---------------------------------------------------------------------------
+
+rule plot_damage:
+    input:
+        profile  = "results/samples/{sample_id}/{sample_id}.damage_profile.tsv",
+        stats    = "results/samples/{sample_id}/{sample_id}.damage_stats.tsv",
+        global_  = "results/samples/{sample_id}/{sample_id}.damage_global.tsv",
+        frac     = "results/samples/{sample_id}/{sample_id}.damage_fractional_profile.tsv",
+        hits     = "results/summary/all_samples.hits.tsv",
+    output:
+        profile_pdf  = "results/samples/{sample_id}/{sample_id}.damage_profile.pdf",
+        summary_pdf  = "results/samples/{sample_id}/{sample_id}.damage_summary.pdf",
+        frac_pdf     = "results/samples/{sample_id}/{sample_id}.damage_fractional.pdf",
+    params:
+        sample_id                = "{sample_id}",
+        max_pos                  = config["damage_max_pos"],
+        annotate_min_classified  = config["damage_annotate_min_classified"],
+    resources:
+        mem_mb   = config["resources"]["plot_damage"]["mem_mb"],
+        runtime  = config["resources"]["plot_damage"]["runtime"],
+    log:
+        "logs/samples/{sample_id}.plot_damage.log"
+    shell:
+        """
+        python "{SCRIPTS_DIR}/plot_damage_profile.py" \
+            --profile   {input.profile:q} \
+            --global    {input.global_:q} \
+            --stats     {input.stats:q} \
+            --hits      {input.hits:q} \
+            --sample-id {params.sample_id:q} \
+            --output    {output.profile_pdf:q} \
+            --max-pos   {params.max_pos} \
+            2>> {log:q}
+
+        python "{SCRIPTS_DIR}/plot_damage_summary.py" \
+            --stats                    {input.stats:q} \
+            --hits                     {input.hits:q} \
+            --sample-id                {params.sample_id:q} \
+            --output                   {output.summary_pdf:q} \
+            --min-annotate-classified  {params.annotate_min_classified} \
+            2>> {log:q}
+
+        python "{SCRIPTS_DIR}/plot_damage_fractional.py" \
+            --fractional {input.frac:q} \
+            --global     {input.global_:q} \
+            --hits       {input.hits:q} \
+            --sample-id  {params.sample_id:q} \
+            --output     {output.frac_pdf:q} \
+            2>> {log:q}
+        """

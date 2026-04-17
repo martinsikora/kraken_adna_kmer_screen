@@ -1,0 +1,5 @@
+unit_id	sample_id	kraken_class	kraken_report
+SAMPLE_A_L1	SAMPLE_A	/path/to/krakenuniq/SAMPLE_A_L1.krakenuniq_class.tsv.gz	/path/to/krakenuniq/SAMPLE_A_L1.krakenuniq_report.tsv
+SAMPLE_A_L2	SAMPLE_A	/path/to/krakenuniq/SAMPLE_A_L2.krakenuniq_class.tsv.gz	/path/to/krakenuniq/SAMPLE_A_L2.krakenuniq_report.tsv
+SAMPLE_B_L1	SAMPLE_B	/path/to/krakenuniq/SAMPLE_B_L1.krakenuniq_class.tsv.gz	/path/to/krakenuniq/SAMPLE_B_L1.krakenuniq_report.tsv
+SAMPLE_B_L2	SAMPLE_B	/path/to/krakenuniq/SAMPLE_B_L2.krakenuniq_class.tsv.gz	/path/to/krakenuniq/SAMPLE_B_L2.krakenuniq_report.tsv
