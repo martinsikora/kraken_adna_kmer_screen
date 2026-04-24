@@ -2,7 +2,7 @@
 """
 plot_damage_summary.py
 
-Summary biplot of aDNA damage across all taxa from adna_damage_estimate.py output.
+Summary biplot of aDNA damage across all taxa from workflow damage TSV outputs.
 
 One point per taxon:
   X axis : baseline classified k-mer rate  (1 - plateau_frac_unclassified)
@@ -16,8 +16,7 @@ Usage:
     --stats  sample_stats.tsv \\
     --output damage_summary.pdf \\
     [--pvalue-threshold 0.05] \\
-    [--min-reads 10] \\
-    [--annotate-top 20]
+    [--min-reads 10]
 """
 
 import argparse
@@ -31,6 +30,8 @@ import matplotlib.cm as cm
 from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
+
+from hit_species_selection import select_hit_species
 
 
 # marker size: area = (log10(n) * SIZE_SCALE) ** SIZE_EXP
@@ -74,13 +75,12 @@ def make_plot(
     df: pd.DataFrame,
     pvalue_threshold: float,
     output_path: str,
-    min_annotate_classified: float,
     max_pos_x: float | None,
     hit_species: set[str] | None = None,
 ):
     vmax = max(float(df["neg_log10_p"].dropna().max()), 2.0)
     norm = mcolors.Normalize(vmin=0, vmax=vmax)
-    cmap = cm.get_cmap("viridis")
+    cmap = matplotlib.colormaps["viridis"]
 
     fig, ax = plt.subplots(figsize=(9, 6.5))
 
@@ -104,17 +104,12 @@ def make_plot(
     # reference line
     ax.axhline(0, color="gray", lw=0.8, ls="--", alpha=0.5, zorder=1)
 
-    # annotations: hit species + significant species with classified rate >= threshold
-    # non-hit species that qualify via classified rate get an asterisk suffix
+    # annotate only selected hit species from --hits filtering
     if hit_species is None:
         hit_species = set()
-    in_hits  = df["significant"] & df["label"].isin(hit_species)
-    by_class = df["significant"] & (df["x"] >= min_annotate_classified)
-    to_annotate = df[in_hits | by_class].copy()
+    to_annotate = df[df["label"].isin(hit_species)].copy()
     for _, row in to_annotate.iterrows():
         label = row["label"]
-        if label not in hit_species:
-            label = label + " *"
         ax.annotate(
             label,
             xy=(row["x"], row["y"]),
@@ -175,7 +170,7 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--stats", required=True,
-                   help="*_stats.tsv from adna_damage_estimate.py")
+                   help="*_damage_stats.tsv from aggregate_sample.py")
     p.add_argument("--output", required=True,
                    help="Output plot path (.pdf or .png)")
     p.add_argument("--pvalue-threshold", type=float, default=0.05,
@@ -183,39 +178,78 @@ def parse_args():
     p.add_argument("--min-reads", type=int, default=10,
                    help="Minimum reads to include a taxon (default: 10)")
     p.add_argument("--hits",      default=None,
-                   help="all_samples.hits.tsv — hit species are always annotated")
+                   help="Integrated summary table (.tsv/.tsv.gz); hit species are always annotated")
     p.add_argument("--sample-id", default=None,
                    help="Sample ID to filter from --hits table")
-    p.add_argument("--min-annotate-classified", type=float, default=0.6,
-                   dest="min_annotate_classified",
-                   help="Minimum baseline classified rate (1 - plateau_frac_unc) "
-                        "for a significant taxon to be annotated (default: 0.6)")
+    p.add_argument("--hits-required-flags", nargs="+", default=[],
+                   help="Required tokens in hit_criteria_flag for --hits selection "
+                        "(all must be present)")
+    p.add_argument("--max-keys", type=int, default=200,
+                   help="Maximum number of hit species to annotate (default: 200; <=0 disables cap)")
     p.add_argument("--max-x", type=float, default=None, dest="max_pos_x",
                    help="Clip x-axis maximum (default: auto)")
     return p.parse_args()
+
+
+def write_empty_plot(output_path: str, note: str) -> None:
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.axis("off")
+    ax.text(
+        0.5, 0.62,
+        "No damage-summary points available",
+        ha="center", va="center", fontsize=13, fontweight="bold",
+    )
+    ax.text(
+        0.5, 0.42,
+        note,
+        ha="center", va="center", fontsize=9.5,
+    )
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    print(f"Saved {output_path} (empty summary)", file=sys.stderr)
+
+
+def _resolve_required_hit_flags(args: argparse.Namespace) -> list[str]:
+    if args.hits_required_flags:
+        return args.hits_required_flags
+    return ["damage_pvalue", "within_genus_relative_abundance", "classified_rate"]
 
 
 def main():
     args = parse_args()
     df = load_stats(args.stats, args.pvalue_threshold, args.min_reads)
     if df.empty:
-        print("ERROR: no data found in the provided stats file", file=sys.stderr)
-        sys.exit(1)
+        write_empty_plot(
+            args.output,
+            "No taxa passed plotting filters (end=5prime and min-reads threshold).",
+        )
+        sys.exit(0)
     hit_species: set[str] = set()
+    required_hit_flags = _resolve_required_hit_flags(args)
     if args.hits and args.sample_id:
         try:
-            hdf = pd.read_csv(args.hits, sep="\t", dtype={"sample_id": str})
-            hit_species = set(
-                hdf[hdf["sample_id"] == str(args.sample_id)]["species_name"].dropna()
+            selected, hit_info = select_hit_species(
+                hits_path=args.hits,
+                sample_id=str(args.sample_id),
+                required_flag_tokens=required_hit_flags,
+                max_keys=args.max_keys,
             )
-        except (FileNotFoundError, pd.errors.EmptyDataError):
+            hit_species = set(selected)
+            if hit_info["n_truncated"] > 0:
+                print(
+                    f"WARNING: selected hit species truncated to {len(hit_species)} "
+                    f"(dropped {hit_info['n_truncated']} by --max-keys).",
+                    file=sys.stderr,
+                )
+        except (FileNotFoundError, pd.errors.EmptyDataError, pd.errors.ParserError, EOFError, OSError) as e:
+            print(f"WARNING: could not read --hits file ({args.hits}): {e}", file=sys.stderr)
             pass
 
     make_plot(
         df,
         pvalue_threshold=args.pvalue_threshold,
         output_path=args.output,
-        min_annotate_classified=args.min_annotate_classified,
         max_pos_x=args.max_pos_x,
         hit_species=hit_species,
     )

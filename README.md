@@ -29,10 +29,10 @@ For each sample:
   merged vector + reference matrix ──► fit_abundance ──► abundance.tsv
 
 All samples:
-  abundance + damage + coverage ──► aggregate_all ──► summary tables + hit table
+  abundance + damage + coverage ──► aggregate_all ──► integrated summary table (.tsv.gz)
 
 Per sample (auto):
-  damage TSVs + hit table ──► plot_damage ──► damage_profile.pdf
+  damage TSVs + integrated summary flags ──► plot_damage ──► damage_profile.pdf
                                             ──► damage_summary.pdf
                                             ──► damage_fractional.pdf
 ```
@@ -219,6 +219,7 @@ Key parameters:
 | `genus_taxids` | Path to `genus.tax_ids.tsv.gz` |
 | `units_tsv` | Path to sample/unit manifest |
 | `target_genus_file` | Optional genus filter file (empty = disabled) |
+| `exclude_taxids` | Taxids excluded during vectorization (defaults: `0,1,2,131567`) |
 
 ### NNLS fitting
 
@@ -228,6 +229,8 @@ Key parameters:
 | `fit_granularity` | `genus` | `species`, `genus`, or `within-genus` |
 | `fit_constraint` | `nnls` | `nnls` or `simplex` |
 | `max_candidates` | `1024` | Max candidate species per genus (fast mode) |
+| `max_feature_support` | `0` | Drop features present in more than this many species (`0` disables filter) |
+| `min_genus_relative_abundance` | `0.0` | Minimum genus abundance before within-genus fit |
 | `target_genus` | `[]` | Inline list of genus names/taxids to fit |
 | `restrict_to_target_genus_features` | `false` | Drop features outside target genera |
 
@@ -242,18 +245,44 @@ Key parameters:
 | `damage_plateau_search_start` | `3` | Plateau search window start (positions from end) |
 | `damage_plateau_search_end` | `10` | Plateau search window end |
 | `damage_strata` | `["31-40","41-55","56-75","76-100"]` | Read-length strata (bp) |
-| `damage_annotate_min_classified` | `0.6` | Min baseline classified rate for plot annotation |
+| `damage_plot_required_hit_flags` | `["damage_pvalue","within_genus_relative_abundance","classified_rate"]` | Required hit tokens for selecting taxa in damage plots |
+| `damage_plot_max_keys` | `200` | Max taxa/pages per damage plot PDF |
 
-### Hit table thresholds
+### Coverage evenness
 
-A species enters the final hit table (`all_samples.hits.tsv`) only when all three
-criteria are met:
+| Parameter | Default | Description |
+|---|---|---|
+| `evenness_min_reads` | `50` | Minimum reads for evenness reporting |
+| `evenness_ranks` | `[species,genus]` | Taxonomic ranks emitted in coverage table |
+
+### Hit criteria thresholds
+
+The integrated summary table (`all_samples.summary.tsv.gz`) stores passing criteria
+as semicolon-delimited tokens in `hit_criteria_flag`:
 
 | Parameter | Default | Criterion |
 |---|---|---|
 | `hit_max_damage_pvalue` | `0.05` | `damage_pvalue` < threshold |
 | `hit_min_evenness` | `0.5` | `evenness_index` > threshold |
 | `hit_min_within_genus_ra` | `0.1` | `within_genus_relative_abundance` ≥ threshold |
+| `hit_min_classified_rate` | `0.5` | `plateau_classified_rate` ≥ threshold |
+
+When all four criteria pass, `hit_criteria_flag` is:
+`damage_pvalue;evenness_index;within_genus_relative_abundance;classified_rate`.
+
+Rows are included in `all_samples.summary.tsv.gz` only when abundance, evenness,
+damage, and classified-rate statistics are all available for that sample/species.
+
+### Compute resources
+
+| Parameter | Description |
+|---|---|
+| `resources.screen_unit` | Memory/runtime for per-unit vectorization |
+| `resources.aggregate_sample` | Memory/runtime for per-sample aggregation |
+| `resources.fit_abundance` | Memory/runtime for NNLS fitting |
+| `resources.coverage_evenness` | Memory/runtime for evenness parsing |
+| `resources.aggregate_all` | Memory/runtime for cross-sample summary |
+| `resources.plot_damage` | Memory/runtime for per-sample PDF plotting |
 
 ---
 
@@ -281,7 +310,7 @@ bash run_dataset_slurm.sh my_dataset --unlock   # after a failed run
 
 Use `-h` / `--help` for the full option list of either runner script.
 
-All six summary tables and per-sample damage PDFs are built by the default `all` target.
+The integrated summary table and per-sample damage PDFs are built by the default `all` target.
 
 ---
 
@@ -307,16 +336,11 @@ All six summary tables and per-sample damage PDFs are built by the default `all`
 
 | File | Description |
 |---|---|
-| `all_samples.abundance.tsv` | Stacked per-species abundance table (all samples) |
-| `all_samples.damage.tsv` | Stacked per-species damage scores (all samples) |
-| `all_samples.coverage.tsv` | Stacked per-taxon coverage statistics (all samples) |
-| `all_samples.species.tsv` | Outer join of abundance + damage (all samples, all species) |
-| `all_samples.hits.tsv` | Final hit table — species passing all three filters |
-| `all_samples.summary.tsv` | One row per sample with top species, total reads, fit metrics |
+| `all_samples.summary.tsv.gz` | Single integrated sample-species table with abundance, damage, coverage, and hit-criterion tokens |
 
 ### Key output columns
 
-**`all_samples.hits.tsv`** (selected columns):
+**`all_samples.summary.tsv.gz`** (selected columns):
 
 | Column | Description |
 |---|---|
@@ -332,6 +356,7 @@ All six summary tables and per-sample damage PDFs are built by the default `all`
 | `evenness_index` | Lander-Waterman evenness (1 = Poisson-uniform, <1 = clumped) |
 | `cov` | Breadth of k-mer coverage (fraction of genome represented) |
 | `dup` | Mean k-mer depth (total k-mers / unique k-mers) |
+| `hit_criteria_flag` | Semicolon-delimited passing criteria tokens from: `damage_pvalue`, `evenness_index`, `within_genus_relative_abundance`, `classified_rate` |
 
 ---
 
@@ -345,9 +370,8 @@ Three PDFs are produced per sample:
 
 - **`damage_summary.pdf`** — Scatter plot of all profiled taxa. X axis: baseline
   classified k-mer rate; Y axis: damage score (%). Point size = log₁₀(reads); colour
-  = −log₁₀(p-value). Triangles = significant. Hit species are always annotated;
-  other significant taxa with classified rate ≥ `damage_annotate_min_classified` are
-  annotated with an asterisk.
+  = −log₁₀(p-value). Triangles = significant. Only selected hit species are
+  annotated.
 
 - **`damage_fractional.pdf`** — Fractional-position profiles (0 = 5′, 1 = 3′) for
   hit species, stratified by read-length. Shows the U-shaped overlap artifact in

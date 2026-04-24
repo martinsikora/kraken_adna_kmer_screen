@@ -8,8 +8,8 @@ Combines:
 - Utility functions from kraken_abundance.py (prototype 1)
 - Taxonomy loaders adapted for the new column schema
   (tax_rank, tax_id, tax_name, tax_ids_descendant)
-- DamageAccumulator / FractionalAccumulator classes from adna_damage_estimate.py
-  (prototype 2) with damage scoring logic
+- DamageAccumulator / FractionalAccumulator logic used by
+  screen_unit.py and aggregate_sample.py
 - Unified kmer string parser for single-pass vectorize+damage accumulation
 - Damage array serialization / deserialization helpers
 """
@@ -333,7 +333,7 @@ def build_feature_lookup(path: str | Path) -> Dict[int, int]:
 
 # ---------------------------------------------------------------------------
 # aDNA damage accumulation classes
-# (adapted from adna_damage_estimate.py prototype 2)
+# Shared accumulator implementation used by workflow damage scripts.
 # ---------------------------------------------------------------------------
 
 def parse_strata_spec(specs: list[str]) -> list[tuple[int, int]]:
@@ -392,12 +392,20 @@ class FractionalAccumulator:
         np.add.at(self._unc[key][s],   bis, (kmers == 0).astype(np.int64))
 
     def to_dataframe(self, min_reads: int = 1) -> pd.DataFrame:
+        """
+        Export fractional profiles for keys with at least `min_reads` total reads
+        across all configured strata. Per-stratum rows are emitted whenever a
+        stratum has at least one read.
+        """
         rows = []
         for key in self._total:
             is_int = isinstance(key, int)
+            total_reads = int(self._reads[key].sum())
+            if total_reads < min_reads:
+                continue
             for s_idx, (lo, hi) in enumerate(self.strata):
                 n_reads = int(self._reads[key][s_idx])
-                if n_reads < min_reads:
+                if n_reads == 0:
                     continue
                 tot_arr = self._total[key][s_idx]
                 unc_arr = self._unc[key][s_idx]
@@ -547,6 +555,16 @@ def find_adaptive_plateau(
         pe = ps
         plateau_val = float(frac[ps]) if valid_positions else np.nan
         return ps, pe, plateau_val, len(valid_positions), 0
+
+    # If we have too few positions for min_window, use all available positions
+    # as a single fallback plateau window instead of indexing past bounds.
+    if len(valid_positions) < min_window:
+        ps = valid_positions[0]
+        pe = valid_positions[-1]
+        n_tot = sum(int(raw_total[p]) for p in valid_positions)
+        n_unc = sum(int(raw_unc[p]) for p in valid_positions)
+        plateau_val = (n_unc / n_tot) if n_tot > 0 else np.nan
+        return ps, pe, plateau_val, len(valid_positions), 1
 
     best_ps, best_pe = valid_positions[0], valid_positions[min_window - 1]
     best_mean = np.nan

@@ -90,18 +90,23 @@ def restrict_genus_features_tokens(wc=None):
     return []
 
 
+def damage_plot_required_hit_flags(wc=None):
+    """
+    Required hit_criteria_flag tokens for selecting taxa in plotting scripts.
+    """
+    flags = config.get("damage_plot_required_hit_flags", None)
+    if flags:
+        return [str(f) for f in flags]
+    return ["damage_pvalue", "within_genus_relative_abundance", "classified_rate"]
+
+
 # ---------------------------------------------------------------------------
 # Default target
 # ---------------------------------------------------------------------------
 
 rule all:
     input:
-        "results/summary/all_samples.abundance.tsv",
-        "results/summary/all_samples.damage.tsv",
-        "results/summary/all_samples.coverage.tsv",
-        "results/summary/all_samples.species.tsv",
-        "results/summary/all_samples.hits.tsv",
-        "results/summary/all_samples.summary.tsv",
+        "results/summary/all_samples.summary.tsv.gz",
         expand(
             [
                 "results/samples/{sample_id}/{sample_id}.damage_profile.pdf",
@@ -208,7 +213,6 @@ rule fit_abundance:
     input:
         vector           = "results/samples/{sample_id}/{sample_id}.vector.npz",
         matrix           = config["reference_dir"] + "/reference.matrix.npz",
-        matrix_csc       = config["reference_dir"] + "/reference.matrix.csc.npz",
         species_metadata = config["reference_dir"] + "/reference.species.tsv",
         features         = config["reference_dir"] + "/reference.features.tsv",
         genus_taxids     = config["genus_taxids"],
@@ -287,7 +291,7 @@ rule coverage_evenness:
 
 # ---------------------------------------------------------------------------
 # Rule: aggregate_all
-# Concatenate per-sample results into workflow-level summary tables.
+# Concatenate per-sample results into one integrated workflow-level summary table.
 # ---------------------------------------------------------------------------
 
 rule aggregate_all:
@@ -296,21 +300,14 @@ rule aggregate_all:
         damage        = expand("results/samples/{sample_id}/{sample_id}.damage_global.tsv", sample_id=SAMPLES),
         damage_stats  = expand("results/samples/{sample_id}/{sample_id}.damage_stats.tsv", sample_id=SAMPLES),
         coverage      = expand("results/samples/{sample_id}/{sample_id}.coverage.tsv", sample_id=SAMPLES),
-        fit           = expand("results/samples/{sample_id}/{sample_id}.fit.tsv", sample_id=SAMPLES),
     output:
-        abundance = "results/summary/all_samples.abundance.tsv",
-        damage    = "results/summary/all_samples.damage.tsv",
-        coverage  = "results/summary/all_samples.coverage.tsv",
-        species   = "results/summary/all_samples.species.tsv",
-        hits      = "results/summary/all_samples.hits.tsv",
-        summary   = "results/summary/all_samples.summary.tsv",
+        summary   = "results/summary/all_samples.summary.tsv.gz",
     params:
         out_dir              = "results/summary",
-        min_abundance        = config["summary_min_abundance"],
-        min_damage_reads     = config["summary_min_damage_reads"],
         hit_max_damage_pvalue   = config["hit_max_damage_pvalue"],
         hit_min_evenness        = config["hit_min_evenness"],
         hit_min_within_genus_ra = config["hit_min_within_genus_ra"],
+        hit_min_classified_rate = config.get("hit_min_classified_rate", 0.5),
     resources:
         mem_mb   = config["resources"]["aggregate_all"]["mem_mb"],
         runtime  = config["resources"]["aggregate_all"]["runtime"],
@@ -323,13 +320,11 @@ rule aggregate_all:
             --damage         {input.damage:q} \
             --damage-stats   {input.damage_stats:q} \
             --coverage       {input.coverage:q} \
-            --fit            {input.fit:q} \
             --out-dir    {params.out_dir:q} \
-            --min-abundance    {params.min_abundance} \
-            --min-damage-reads {params.min_damage_reads} \
             --hit-max-damage-pvalue   {params.hit_max_damage_pvalue} \
             --hit-min-evenness        {params.hit_min_evenness} \
             --hit-min-within-genus-ra {params.hit_min_within_genus_ra} \
+            --hit-min-classified-rate {params.hit_min_classified_rate} \
             > {log:q} 2>&1
         """
 
@@ -344,7 +339,7 @@ rule plot_damage:
         stats    = "results/samples/{sample_id}/{sample_id}.damage_stats.tsv",
         global_  = "results/samples/{sample_id}/{sample_id}.damage_global.tsv",
         frac     = "results/samples/{sample_id}/{sample_id}.damage_fractional_profile.tsv",
-        hits     = "results/summary/all_samples.hits.tsv",
+        hits     = "results/summary/all_samples.summary.tsv.gz",
     output:
         profile_pdf  = "results/samples/{sample_id}/{sample_id}.damage_profile.pdf",
         summary_pdf  = "results/samples/{sample_id}/{sample_id}.damage_summary.pdf",
@@ -352,7 +347,8 @@ rule plot_damage:
     params:
         sample_id                = "{sample_id}",
         max_pos                  = config["damage_max_pos"],
-        annotate_min_classified  = config["damage_annotate_min_classified"],
+        required_hit_flags       = damage_plot_required_hit_flags(),
+        max_keys                 = int(config.get("damage_plot_max_keys", 200)),
     resources:
         mem_mb   = config["resources"]["plot_damage"]["mem_mb"],
         runtime  = config["resources"]["plot_damage"]["runtime"],
@@ -366,6 +362,8 @@ rule plot_damage:
             --stats     {input.stats:q} \
             --hits      {input.hits:q} \
             --sample-id {params.sample_id:q} \
+            --hits-required-flags {params.required_hit_flags:q} \
+            --max-keys  {params.max_keys} \
             --output    {output.profile_pdf:q} \
             --max-pos   {params.max_pos} \
             2>> {log:q}
@@ -374,8 +372,9 @@ rule plot_damage:
             --stats                    {input.stats:q} \
             --hits                     {input.hits:q} \
             --sample-id                {params.sample_id:q} \
+            --hits-required-flags      {params.required_hit_flags:q} \
+            --max-keys                 {params.max_keys} \
             --output                   {output.summary_pdf:q} \
-            --min-annotate-classified  {params.annotate_min_classified} \
             2>> {log:q}
 
         python "{SCRIPTS_DIR}/plot_damage_fractional.py" \
@@ -383,6 +382,8 @@ rule plot_damage:
             --global     {input.global_:q} \
             --hits       {input.hits:q} \
             --sample-id  {params.sample_id:q} \
+            --hits-required-flags {params.required_hit_flags:q} \
+            --max-keys  {params.max_keys} \
             --output     {output.frac_pdf:q} \
             2>> {log:q}
         """

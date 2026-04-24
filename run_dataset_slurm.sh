@@ -28,7 +28,7 @@ ${COLOR_BOLD}${COLOR_BLUE}Arguments:${COLOR_RESET}
 
 ${COLOR_BOLD}${COLOR_BLUE}Options:${COLOR_RESET}
   ${COLOR_YELLOW}-j, --jobs N${COLOR_RESET}          Maximum number of jobs to run in parallel (default: 100)
-  ${COLOR_YELLOW}-p, --partition NAME${COLOR_RESET}  SLURM partition to use (default: general)
+  ${COLOR_YELLOW}-p, --partition NAME${COLOR_RESET}  SLURM partition to use (default: compregular)
   ${COLOR_YELLOW}-t, --time TIME${COLOR_RESET}       Max walltime per job (default: 4:00:00)
   ${COLOR_YELLOW}-m, --mem MB${COLOR_RESET}          Default memory per job in MB (default: 8000)
   ${COLOR_YELLOW}-c, --config FILE${COLOR_RESET}     Alternate config file (default: config/config.yaml)
@@ -51,7 +51,7 @@ EOF
 
 # Default parameters
 MAX_JOBS=100
-PARTITION="general"
+PARTITION="compregular"
 MAX_TIME="4:00:00"
 DEFAULT_MEM=8000
 SNAKEMAKE_ARGS=()

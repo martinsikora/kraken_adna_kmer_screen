@@ -3,7 +3,7 @@
 plot_damage_fractional.py
 
 Plot fractional-position aDNA damage profiles from pre-computed profiles
-output by adna_damage_estimate.py (*_fractional_profile.tsv files).
+output by aggregate_sample.py (*_damage_fractional_profile.tsv files).
 
 X axis: fractional position along the read (0.0 = 5' end, 1.0 = 3' end)
 Y axis: fraction of unclassified k-mers (%)
@@ -41,7 +41,6 @@ Usage:
 
 import argparse
 import sys
-from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
@@ -49,6 +48,8 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import pandas as pd
+
+from hit_species_selection import select_hit_species
 
 
 # ---------------------------------------------------------------------------
@@ -122,17 +123,82 @@ def parse_strata_spec(specs: list[str]) -> list[tuple[int, int, str, str]]:
 # Load pre-computed fractional profiles
 # ---------------------------------------------------------------------------
 
-def load_fractional(path: str, taxid: int | None, species: str | None) -> pd.DataFrame:
+def load_fractional_table(path: str) -> pd.DataFrame:
     """
-    Load a *_fractional_profile.tsv produced by adna_damage_estimate.py
-    and filter to the requested taxid or species_name.
+    Load a *_fractional_profile.tsv with only columns needed for plotting.
     """
-    df = pd.read_csv(path, sep="\t")
-    if taxid is not None:
-        df = df[df["taxid"] == taxid].copy()
-    elif species is not None:
-        df = df[df["species_name"] == species].copy()
-    return df
+    wanted = {
+        "taxid",
+        "species_name",
+        "stratum",
+        "bin",
+        "n_reads",
+        "n_total",
+        "n_unclassified",
+    }
+    return pd.read_csv(path, sep="\t", usecols=lambda c: c in wanted)
+
+
+def build_key_lookup(df: pd.DataFrame) -> dict[str, dict]:
+    """
+    Build key -> row-index lookups so per-key plotting doesn't re-scan the table.
+    """
+    species_lookup: dict[str, pd.Index] = {}
+    taxid_lookup: dict[int, pd.Index] = {}
+
+    if "species_name" in df.columns:
+        sp = df["species_name"].fillna("").astype(str).str.strip()
+        mask = sp != ""
+        if mask.any():
+            species_lookup = {
+                str(k): idx
+                for k, idx in df.loc[mask].groupby(sp[mask], sort=False).groups.items()
+            }
+
+    if "taxid" in df.columns:
+        tax = pd.to_numeric(df["taxid"], errors="coerce")
+        mask = tax.notna()
+        if mask.any():
+            tax_i = tax[mask].astype(int)
+            taxid_lookup = {
+                int(k): idx
+                for k, idx in df.loc[mask].groupby(tax_i, sort=False).groups.items()
+            }
+
+    return {"species": species_lookup, "taxid": taxid_lookup}
+
+
+def subset_for_key(df: pd.DataFrame, lookup: dict[str, dict], key) -> pd.DataFrame:
+    """Return subset rows for a key using precomputed lookup."""
+    if isinstance(key, int):
+        idx = lookup["taxid"].get(int(key))
+    else:
+        idx = lookup["species"].get(str(key))
+    if idx is None:
+        return df.iloc[0:0]
+    return df.loc[idx]
+
+
+def filter_missing_keys(keys, lookups):
+    """Drop keys that are absent from all loaded fractional tables."""
+    if not keys:
+        return keys
+    if isinstance(keys[0], int):
+        available = set()
+        for lookup in lookups:
+            available.update(lookup["taxid"].keys())
+    else:
+        available = set()
+        for lookup in lookups:
+            available.update(lookup["species"].keys())
+    kept = [k for k in keys if k in available]
+    dropped = len(keys) - len(kept)
+    if dropped > 0:
+        print(
+            f"WARNING: dropped {dropped} selected taxa with no fractional rows.",
+            file=sys.stderr,
+        )
+    return kept
 
 
 def build_arrays(
@@ -245,7 +311,7 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--fractional", nargs="+", required=True,
-                   help="*_fractional_profile.tsv file(s) from adna_damage_estimate.py")
+                   help="*_damage_fractional_profile.tsv file(s) from aggregate_sample.py")
     p.add_argument("--output", required=True,
                    help="Output plot path (.pdf or .png)")
     p.add_argument("--label",  nargs="+", default=[],
@@ -263,13 +329,43 @@ def parse_args():
                    help="damage_global.tsv for auto-selecting significant taxa "
                         "(used when --taxid/--species are omitted and --hits not provided)")
     p.add_argument("--hits",       default=None,
-                   help="all_samples.hits.tsv — use hit species for this sample as key list")
+                   help="Integrated summary table (.tsv/.tsv.gz); use sample hit species as key list")
     p.add_argument("--sample-id",  default=None,
                    help="Sample ID to filter from --hits table")
+    p.add_argument("--hits-required-flags", nargs="+", default=[],
+                   help="Required tokens in hit_criteria_flag for --hits selection "
+                        "(all must be present)")
+    p.add_argument("--max-keys", type=int, default=200,
+                   help="Maximum number of taxa/pages to plot for auto or --hits selection (default: 200; <=0 disables cap)")
     p.add_argument("--pvalue-threshold", type=float, default=0.05,
                    help="Max damage_pvalue for auto-selection (default: 0.05)")
 
     return p.parse_args()
+
+
+def _resolve_required_hit_flags(args: argparse.Namespace) -> list[str]:
+    if args.hits_required_flags:
+        return args.hits_required_flags
+    return ["damage_pvalue", "within_genus_relative_abundance", "classified_rate"]
+
+
+def write_empty_plot(output_path: str, note: str) -> None:
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.axis("off")
+    ax.text(
+        0.5, 0.62,
+        "No fractional damage plots were generated",
+        ha="center", va="center", fontsize=13, fontweight="bold",
+    )
+    ax.text(
+        0.5, 0.42,
+        note,
+        ha="center", va="center", fontsize=9.5,
+    )
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    print(f"Saved {output_path} (empty fractional)", file=sys.stderr)
 
 
 def main():
@@ -279,17 +375,32 @@ def main():
 
     # Resolve which taxa to plot: --hits takes priority, then explicit args, then auto
     hit_species: list[str] = []
-    if args.hits and args.sample_id:
+    required_hit_flags = _resolve_required_hit_flags(args)
+    use_hits = bool(args.hits and args.sample_id)
+    if use_hits:
         try:
-            hdf = pd.read_csv(args.hits, sep="\t", dtype={"sample_id": str})
-            hit_species = (
-                hdf[hdf["sample_id"] == str(args.sample_id)]["species_name"]
-                .dropna().unique().tolist()
+            hit_species, hit_info = select_hit_species(
+                hits_path=args.hits,
+                sample_id=str(args.sample_id),
+                required_flag_tokens=required_hit_flags,
+                max_keys=args.max_keys,
             )
-        except (FileNotFoundError, pd.errors.EmptyDataError):
+            if not hit_species:
+                print(
+                    "WARNING: no hit species matched all required hit flags for this sample.",
+                    file=sys.stderr,
+                )
+            if hit_info["n_truncated"] > 0:
+                print(
+                    f"WARNING: selected hit species truncated to {len(hit_species)} "
+                    f"(dropped {hit_info['n_truncated']} by --max-keys).",
+                    file=sys.stderr,
+                )
+        except (FileNotFoundError, pd.errors.EmptyDataError, pd.errors.ParserError, EOFError, OSError) as e:
+            print(f"WARNING: could not read --hits file ({args.hits}): {e}", file=sys.stderr)
             pass
 
-    if hit_species:
+    if use_hits:
         keys = hit_species
     elif args.taxid is not None:
         keys = [args.taxid]
@@ -297,6 +408,14 @@ def main():
         keys = [args.species]
     else:
         keys = resolve_keys(args.global_tsv, args.pvalue_threshold)
+        if args.max_keys > 0 and len(keys) > args.max_keys:
+            dropped = len(keys) - args.max_keys
+            keys = keys[: args.max_keys]
+            print(
+                f"WARNING: auto-selected taxa truncated to {len(keys)} "
+                f"(dropped {dropped} by --max-keys).",
+                file=sys.stderr,
+            )
 
     if not keys:
         print(
@@ -304,9 +423,10 @@ def main():
             "significant taxa.",
             file=sys.stderr,
         )
-        # Write an empty PDF so Snakemake output is satisfied
-        with PdfPages(args.output) as _pdf:
-            pass
+        write_empty_plot(
+            args.output,
+            "No taxa were selected from --hits, explicit args, or --global fallback.",
+        )
         sys.exit(0)
 
     n = len(args.fractional)
@@ -314,19 +434,26 @@ def main():
     sample_colors = [DEFAULT_SAMPLE_COLORS[i % len(DEFAULT_SAMPLE_COLORS)] for i in range(n)]
     sample_styles = [DEFAULT_SAMPLE_STYLES[i % len(DEFAULT_SAMPLE_STYLES)] for i in range(n)]
 
+    all_tables = [load_fractional_table(p) for p in args.fractional]
+    lookups = [build_key_lookup(df) for df in all_tables]
+    keys = filter_missing_keys(keys, lookups)
+    if not keys:
+        write_empty_plot(
+            args.output,
+            "No selected taxa had matching rows in fractional profile tables.",
+        )
+        sys.exit(0)
+
+    pages_written = 0
     with PdfPages(args.output) as pdf:
         for key in keys:
-            taxid   = key if isinstance(key, int) else None
-            species = key if isinstance(key, str) else None
-
             all_dfs = [
-                load_fractional(p, taxid=taxid, species=species)
-                for p in args.fractional
+                subset_for_key(df, lookup, key)
+                for df, lookup in zip(all_tables, lookups)
             ]
 
             n_bins_vals = [int(df["bin"].max()) + 1 for df in all_dfs if not df.empty]
             if not n_bins_vals:
-                print(f"WARNING: no data found for key {key!r}, skipping.", file=sys.stderr)
                 continue
             n_bins = max(n_bins_vals)
 
@@ -344,8 +471,32 @@ def main():
             )
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
+            pages_written += 1
 
-    print(f"Saved {args.output} ({len(keys)} page(s))", file=sys.stderr)
+        if pages_written == 0:
+            # Keep Snakemake outputs consistent even when requested taxa are absent.
+            fig, ax = plt.subplots(figsize=(8.5, 4.5))
+            ax.axis("off")
+            ax.text(
+                0.5, 0.62,
+                "No fractional damage plots were generated",
+                ha="center", va="center", fontsize=13, fontweight="bold",
+            )
+            ax.text(
+                0.5, 0.42,
+                "Selected taxa had no matching rows in the fractional profile table.",
+                ha="center", va="center", fontsize=10,
+            )
+            ax.text(
+                0.5, 0.28,
+                "Try --species/--taxid, or verify species naming in --hits vs *_fractional_profile.tsv.",
+                ha="center", va="center", fontsize=9, color="#555555",
+            )
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+            pages_written = 1
+
+    print(f"Saved {args.output} ({pages_written} page(s))", file=sys.stderr)
 
 
 if __name__ == "__main__":

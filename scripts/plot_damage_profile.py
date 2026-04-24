@@ -2,7 +2,7 @@
 """
 plot_damage_profile.py
 
-Plot absolute-position aDNA damage profiles from adna_damage_estimate.py output.
+Plot absolute-position aDNA damage profiles from workflow damage TSV outputs.
 
 X axis: position from read end (0 = terminal k-mer)
 Y axis: fraction of unclassified k-mers (%)
@@ -30,12 +30,11 @@ Usage:
     [--taxids 1649845]
 
   --stats is optional but recommended: when provided, the adaptive plateau window
-  and per-end p-values from adna_damage_estimate.py are used directly.
+  and per-end p-values from aggregate_sample.py outputs are used directly.
 """
 
 import argparse
 import sys
-from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
@@ -43,6 +42,8 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import pandas as pd
+
+from hit_species_selection import select_hit_species
 
 
 DEFAULT_COLORS = ["#d6604d", "#2166ac", "#4dac26", "#8073ac"]
@@ -115,6 +116,26 @@ def resolve_keys(gdfs, requested_taxids, requested_species, pvalue_threshold=0.0
     )
 
 
+def filter_missing_species_keys(keys, profiles):
+    """Drop species keys absent from all loaded profile tables."""
+    if not keys or not isinstance(keys[0], str):
+        return keys
+    available = set()
+    for profile in profiles:
+        if "species_name" in profile.columns:
+            available.update(profile["species_name"].dropna().astype(str))
+    if not available:
+        return keys
+    kept = [k for k in keys if k in available]
+    dropped = len(keys) - len(kept)
+    if dropped > 0:
+        print(
+            f"WARNING: dropped {dropped} selected species with no profile rows.",
+            file=sys.stderr,
+        )
+    return kept
+
+
 def plot_end(ax, profiles, gdfs, stats_dfs, labels, colors, styles,
              key, end, max_pos, plateau_start, plateau_end):
     key_col = "species_name" if isinstance(key, str) else "taxid"
@@ -169,7 +190,9 @@ def plot_end(ax, profiles, gdfs, stats_dfs, labels, colors, styles,
     ax.set_ylabel("Unclassified k-mers (%)", fontsize=8)
     ax.set_xlim(-0.5, max_pos - 0.5)
     ax.set_ylim(bottom=0)
-    ax.legend(fontsize=7.5, frameon=False)
+    handles, _ = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(fontsize=7.5, frameon=False)
     ax.spines[["top", "right"]].set_visible(False)
     ax.tick_params(labelsize=7)
 
@@ -213,9 +236,9 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--profile", nargs="+", required=True,
-                   help="*_profile.tsv file(s) from adna_damage_estimate.py")
+                   help="*_damage_profile.tsv file(s) from aggregate_sample.py")
     p.add_argument("--global",  nargs="+", required=True, dest="global_",
-                   help="*_global.tsv file(s) from adna_damage_estimate.py")
+                   help="*_damage_global.tsv file(s) from aggregate_sample.py")
     p.add_argument("--stats",   nargs="+", default=[],
                    help="*_stats.tsv file(s) — enables adaptive plateau shading and p-values")
     p.add_argument("--label",   nargs="+", default=[])
@@ -225,9 +248,14 @@ def parse_args():
     p.add_argument("--species", nargs="+", default=[],
                    help="Species names to plot (for species-aggregated profiles)")
     p.add_argument("--hits",       default=None,
-                   help="all_samples.hits.tsv — use hit species for this sample as key list")
+                   help="Integrated summary table (.tsv/.tsv.gz); use sample hit species as key list")
     p.add_argument("--sample-id",  default=None,
                    help="Sample ID to filter from --hits table")
+    p.add_argument("--hits-required-flags", nargs="+", default=[],
+                   help="Required tokens in hit_criteria_flag for --hits selection "
+                        "(all must be present)")
+    p.add_argument("--max-keys", type=int, default=200,
+                   help="Maximum number of taxa/pages to plot for auto or --hits selection (default: 200; <=0 disables cap)")
     p.add_argument("--max-pos",          type=int, default=20)
     p.add_argument("--plateau-start",    type=int, default=3,
                    help="Fallback plateau start when --stats not provided (default: 3)")
@@ -236,6 +264,31 @@ def parse_args():
     p.add_argument("--pvalue-threshold", type=float, default=0.05,
                    help="Max damage_pvalue for auto-selection of taxa (default: 0.05)")
     return p.parse_args()
+
+
+def _resolve_required_hit_flags(args: argparse.Namespace) -> list[str]:
+    if args.hits_required_flags:
+        return args.hits_required_flags
+    return ["damage_pvalue", "within_genus_relative_abundance", "classified_rate"]
+
+
+def write_empty_plot(output_path: str, note: str) -> None:
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.axis("off")
+    ax.text(
+        0.5, 0.62,
+        "No damage-profile plots were generated",
+        ha="center", va="center", fontsize=13, fontweight="bold",
+    )
+    ax.text(
+        0.5, 0.42,
+        note,
+        ha="center", va="center", fontsize=9.5,
+    )
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    print(f"Saved {output_path} (empty profile)", file=sys.stderr)
 
 
 def main():
@@ -258,27 +311,54 @@ def main():
     styles = [DEFAULT_STYLES[i % len(DEFAULT_STYLES)] for i in range(n)]
     # --hits overrides auto-selection: use species from the hit table for this sample
     hit_species: list[str] = []
-    if args.hits and args.sample_id:
+    required_hit_flags = _resolve_required_hit_flags(args)
+    use_hits = bool(args.hits and args.sample_id)
+    if use_hits:
         try:
-            hdf = pd.read_csv(args.hits, sep="\t", dtype={"sample_id": str})
-            hit_species = (
-                hdf[hdf["sample_id"] == str(args.sample_id)]["species_name"]
-                .dropna().unique().tolist()
+            hit_species, hit_info = select_hit_species(
+                hits_path=args.hits,
+                sample_id=str(args.sample_id),
+                required_flag_tokens=required_hit_flags,
+                max_keys=args.max_keys,
             )
-        except (FileNotFoundError, pd.errors.EmptyDataError):
+            if not hit_species:
+                print(
+                    "WARNING: no hit species matched all required hit flags for this sample.",
+                    file=sys.stderr,
+                )
+            if hit_info["n_truncated"] > 0:
+                print(
+                    f"WARNING: selected hit species truncated to {len(hit_species)} "
+                    f"(dropped {hit_info['n_truncated']} by --max-keys).",
+                    file=sys.stderr,
+                )
+        except (FileNotFoundError, pd.errors.EmptyDataError, pd.errors.ParserError, EOFError, OSError) as e:
+            print(f"WARNING: could not read --hits file ({args.hits}): {e}", file=sys.stderr)
             pass
 
-    if hit_species:
+    if use_hits:
         keys = hit_species
     else:
         keys = resolve_keys(gdfs, args.taxids, args.species, args.pvalue_threshold)
+        if (not args.taxids and not args.species and args.max_keys > 0
+                and len(keys) > args.max_keys):
+            dropped = len(keys) - args.max_keys
+            keys = keys[: args.max_keys]
+            print(
+                f"WARNING: auto-selected taxa truncated to {len(keys)} "
+                f"(dropped {dropped} by --max-keys).",
+                file=sys.stderr,
+            )
+
+    keys = filter_missing_species_keys(keys, profiles)
 
     if not keys:
         print("No taxa found. Use --hits, --taxids, or --species to specify targets.",
               file=sys.stderr)
-        from matplotlib.backends.backend_pdf import PdfPages
-        with PdfPages(args.output) as _pdf:
-            pass
+        write_empty_plot(
+            args.output,
+            "No taxa were selected from --hits or auto-selection criteria.",
+        )
         sys.exit(0)
     make_plot(profiles, gdfs, stats_dfs, labels, colors, styles,
               keys, args.max_pos, args.plateau_start, args.plateau_end, args.output)

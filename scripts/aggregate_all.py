@@ -2,13 +2,11 @@
 """
 aggregate_all.py
 
-Concatenate per-sample result TSVs into workflow-level summary tables.
+Concatenate per-sample result TSVs into one integrated workflow-level summary.
 
 Outputs:
-  all_samples.abundance.tsv      — stacked per-species NNLS results
-  all_samples.damage.tsv         — stacked per-species damage scores
-  all_samples.coverage.tsv       — stacked per-taxon coverage/evenness
-  all_samples.summary.tsv        — one row per sample with key metrics
+  all_samples.summary.tsv.gz     — integrated per-sample/per-species table
+                                   with stable workflow output columns
 """
 
 from __future__ import annotations
@@ -19,7 +17,41 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from kraken_screen_lib import write_tsv
+ABUNDANCE_COLS = [
+    "sample_id", "species_taxid", "species_name",
+    "genus_taxid", "genus_name",
+    "nnls_coefficient", "relative_abundance", "rank",
+    "genus_relative_abundance", "within_genus_relative_abundance",
+    "rank_within_genus",
+]
+DMG_COLS = [
+    "sample_id", "taxid", "species_name",
+    "n_reads", "damage_score", "damage_score_se",
+    "damage_score_ci95_lo", "damage_score_ci95_hi",
+    "damage_pvalue", "damage_score_3prime",
+]
+COV_COLS = [
+    "sample_id", "tax_id", "tax_name", "rank",
+    "reads", "kmers", "dup", "cov", "evenness_index",
+]
+DAMAGE_STATS_COLS = ["sample_id", "species_name", "end", "plateau_frac_unc"]
+HIT_FLAG_LABELS = [
+    "damage_pvalue",
+    "evenness_index",
+    "within_genus_relative_abundance",
+    "classified_rate",
+]
+ALL_PASS_HIT_FLAGS = ";".join(HIT_FLAG_LABELS)
+SUMMARY_OUTPUT_COLS = [
+    "sample_id", "species_taxid", "species_name", "genus_taxid", "genus_name",
+    "relative_abundance", "within_genus_relative_abundance", "genus_relative_abundance",
+    "rank", "rank_within_genus",
+    "n_reads", "damage_score", "damage_score_ci95_lo", "damage_score_ci95_hi",
+    "damage_pvalue", "damage_score_3prime",
+    "plateau_classified_rate",
+    "evenness_index", "cov", "dup", "kmers",
+    "hit_criteria_flag",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,20 +66,16 @@ def parse_args() -> argparse.Namespace:
                         help="Per-sample .damage_stats.tsv files")
     parser.add_argument("--coverage",      nargs="+", required=True,
                         help="Per-sample .coverage.tsv files")
-    parser.add_argument("--fit",           nargs="+", required=True,
-                        help="Per-sample .fit.tsv files")
     parser.add_argument("--out-dir",     required=True,
                         help="Output directory for summary TSVs")
-    parser.add_argument("--min-abundance",    type=float, default=0.0001,
-                        help="Minimum relative_abundance to include in all_samples.abundance.tsv")
-    parser.add_argument("--min-damage-reads", type=int, default=100,
-                        help="Minimum n_reads to include a taxon in all_samples.damage.tsv")
     parser.add_argument("--hit-max-damage-pvalue",   type=float, default=0.05,
                         help="Maximum damage_pvalue for hit table")
     parser.add_argument("--hit-min-evenness",        type=float, default=0.5,
                         help="Minimum evenness_index for hit table")
     parser.add_argument("--hit-min-within-genus-ra", type=float, default=0.1,
                         help="Minimum within_genus_relative_abundance for hit table")
+    parser.add_argument("--hit-min-classified-rate", type=float, default=0.5,
+                        help="Minimum plateau_classified_rate for hit table")
     return parser.parse_args()
 
 
@@ -56,29 +84,225 @@ def infer_sample_id(path: str) -> str:
     return str(Path(path).stem.split(".")[0])
 
 
-def load_stack(paths: list[str], min_filter_col: str | None = None, min_val: float | None = None) -> pd.DataFrame:
+def _read_tsv_subset(
+    path: str,
+    wanted_cols: list[str],
+    nrows: int | None = None,
+) -> pd.DataFrame:
     """
-    Load and concatenate per-sample TSVs, inferring sample_id from filename.
-    Skips missing or empty files gracefully.
+    Read only a requested subset of columns when possible.
+    Falls back to full read+subset for edge-case parser behaviors.
+    """
+    wanted = set(wanted_cols)
+    try:
+        return pd.read_csv(
+            path,
+            sep="\t",
+            usecols=lambda c: c in wanted,
+            nrows=nrows,
+        )
+    except ValueError:
+        # Compatibility fallback for odd files/parsers where callable usecols fails.
+        df = pd.read_csv(path, sep="\t", nrows=nrows)
+        present = [c for c in wanted_cols if c in df.columns]
+        return df[present].copy() if present else pd.DataFrame()
+
+
+def _load_typed_stack(paths: list[str], wanted_cols: list[str]) -> pd.DataFrame:
+    """
+    Load per-sample TSVs with narrow projected columns and concatenate.
     """
     frames: list[pd.DataFrame] = []
     for path in paths:
         try:
-            df = pd.read_csv(path, sep="\t", dtype={"sample_id": str})
+            df = _read_tsv_subset(path, wanted_cols=wanted_cols)
         except (FileNotFoundError, pd.errors.EmptyDataError):
             continue
         if df.empty:
             continue
-        # Add sample_id column if not already present (coverage.tsv already has it)
         if "sample_id" not in df.columns:
             df.insert(0, "sample_id", infer_sample_id(path))
-        # Apply minimum filter
-        if min_filter_col and min_val is not None and min_filter_col in df.columns:
-            df = df[df[min_filter_col] >= min_val].copy()
+        else:
+            df["sample_id"] = df["sample_id"].astype(str)
         frames.append(df)
+
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
+
+
+def load_abundance(paths: list[str]) -> pd.DataFrame:
+    return _load_typed_stack(paths, ABUNDANCE_COLS)
+
+
+def load_damage(paths: list[str]) -> pd.DataFrame:
+    return _load_typed_stack(paths, DMG_COLS)
+
+
+def load_coverage(paths: list[str]) -> pd.DataFrame:
+    cov = _load_typed_stack(paths, COV_COLS)
+    if cov.empty:
+        return cov
+    if "rank" in cov.columns:
+        rank_norm = cov["rank"].astype(str).str.lower()
+        cov = cov.loc[rank_norm == "species"].copy()
+    return cov
+
+
+def load_damage_stats_5prime(paths: list[str]) -> pd.DataFrame:
+    """
+    Load only the 5' damage-stat records needed for plateau_classified_rate merge.
+    """
+    frames: list[pd.DataFrame] = []
+    for path in paths:
+        try:
+            sdf = _read_tsv_subset(path, wanted_cols=DAMAGE_STATS_COLS)
+        except (FileNotFoundError, pd.errors.EmptyDataError):
+            continue
+        if sdf.empty:
+            continue
+        if "sample_id" not in sdf.columns:
+            sdf.insert(0, "sample_id", infer_sample_id(path))
+        else:
+            sdf["sample_id"] = sdf["sample_id"].astype(str)
+        if not {"end", "species_name", "plateau_frac_unc"}.issubset(sdf.columns):
+            continue
+        ends = sdf["end"].astype(str).str.lower()
+        sdf = sdf.loc[ends == "5prime", ["sample_id", "species_name", "plateau_frac_unc"]].copy()
+        if sdf.empty:
+            continue
+        sdf["plateau_classified_rate"] = 1.0 - pd.to_numeric(sdf["plateau_frac_unc"], errors="coerce")
+        frames.append(sdf[["sample_id", "species_name", "plateau_classified_rate"]])
+
+    if not frames:
+        return pd.DataFrame(columns=["sample_id", "species_name", "plateau_classified_rate"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def _series_numeric(df: pd.DataFrame, col: str) -> pd.Series:
+    if col in df.columns:
+        return pd.to_numeric(df[col], errors="coerce")
+    return pd.Series(np.nan, index=df.index, dtype=float)
+
+
+def _taxid_as_string(df: pd.DataFrame, col: str) -> None:
+    """
+    Normalize taxid-like columns to nullable string values without '.0' artifacts.
+    """
+    if col not in df.columns:
+        return
+    df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64").astype("string")
+
+
+def build_integrated_summary(
+    abundance_df: pd.DataFrame,
+    damage_df: pd.DataFrame,
+    damage_stats_5prime_df: pd.DataFrame,
+    coverage_df: pd.DataFrame,
+    hit_max_damage_pvalue: float,
+    hit_min_evenness: float,
+    hit_min_within_genus_ra: float,
+    hit_min_classified_rate: float,
+) -> pd.DataFrame:
+    """
+    Build one integrated sample-species table by outer-joining abundance, damage,
+    and coverage evidence, then retain only rows with complete statistics.
+    """
+    abd = abundance_df[[c for c in ABUNDANCE_COLS if c in abundance_df.columns]].copy() if not abundance_df.empty else pd.DataFrame(columns=["sample_id", "species_name"])
+    dmg = damage_df[[c for c in DMG_COLS if c in damage_df.columns]].copy() if not damage_df.empty else pd.DataFrame(columns=["sample_id", "species_name"])
+    if "taxid" in dmg.columns:
+        dmg = dmg.rename(columns={"taxid": "damage_taxid"})
+
+    cov = pd.DataFrame(columns=["sample_id", "species_name"])
+    if not coverage_df.empty:
+        cov = coverage_df[[c for c in COV_COLS if c in coverage_df.columns]].copy()
+        rename_map = {}
+        if "tax_id" in cov.columns:
+            rename_map["tax_id"] = "coverage_species_taxid"
+        if "tax_name" in cov.columns:
+            rename_map["tax_name"] = "species_name"
+        cov = cov.rename(columns=rename_map)
+        if "rank" in cov.columns:
+            cov = cov.rename(columns={"rank": "coverage_rank"})
+
+    if abd.empty and dmg.empty and cov.empty:
+        return pd.DataFrame()
+
+    merged = abd.merge(dmg, on=["sample_id", "species_name"], how="outer")
+    merged = merged.merge(cov, on=["sample_id", "species_name"], how="outer")
+
+    if "species_taxid" in merged.columns:
+        merged["species_taxid"] = pd.to_numeric(merged["species_taxid"], errors="coerce")
+    else:
+        merged["species_taxid"] = np.nan
+    if "damage_taxid" in merged.columns:
+        merged["species_taxid"] = merged["species_taxid"].combine_first(
+            pd.to_numeric(merged["damage_taxid"], errors="coerce")
+        )
+    if "coverage_species_taxid" in merged.columns:
+        merged["species_taxid"] = merged["species_taxid"].combine_first(
+            pd.to_numeric(merged["coverage_species_taxid"], errors="coerce")
+        )
+    merged["species_taxid"] = merged["species_taxid"].astype("Int64")
+
+    if not damage_stats_5prime_df.empty:
+        merged = merged.merge(
+            damage_stats_5prime_df[["sample_id", "species_name", "plateau_classified_rate"]],
+            on=["sample_id", "species_name"],
+            how="left",
+        )
+
+    # Keep only rows where all required evidence types are present:
+    # abundance + evenness + damage + classified rate.
+    has_abundance = (
+        _series_numeric(merged, "relative_abundance").notna()
+        | _series_numeric(merged, "within_genus_relative_abundance").notna()
+    )
+    has_evenness = _series_numeric(merged, "evenness_index").notna()
+    has_damage = _series_numeric(merged, "damage_pvalue").notna()
+    has_classified_rate = _series_numeric(merged, "plateau_classified_rate").notna()
+    merged = merged[has_abundance & has_evenness & has_damage & has_classified_rate].copy()
+
+    pass_damage = (_series_numeric(merged, "damage_pvalue") < hit_max_damage_pvalue).fillna(False)
+    pass_evenness = (_series_numeric(merged, "evenness_index") > hit_min_evenness).fillna(False)
+    pass_within_genus = (
+        _series_numeric(merged, "within_genus_relative_abundance") >= hit_min_within_genus_ra
+    ).fillna(False)
+    pass_classified_rate = (
+        _series_numeric(merged, "plateau_classified_rate") >= hit_min_classified_rate
+    ).fillna(False)
+
+    flags = np.full(len(merged), "", dtype=object)
+    for label, mask in (
+        (HIT_FLAG_LABELS[0], pass_damage),
+        (HIT_FLAG_LABELS[1], pass_evenness),
+        (HIT_FLAG_LABELS[2], pass_within_genus),
+        (HIT_FLAG_LABELS[3], pass_classified_rate),
+    ):
+        m = mask.to_numpy(dtype=bool, copy=False)
+        flags = np.where(m, np.where(flags == "", label, flags + ";" + label), flags)
+    merged["hit_criteria_flag"] = pd.Series(flags, index=merged.index, dtype="string")
+
+    sort_cols = [c for c in ["sample_id", "species_name"] if c in merged.columns]
+    if "relative_abundance" in merged.columns:
+        merged["__sort_ra"] = pd.to_numeric(merged["relative_abundance"], errors="coerce")
+        sort_cols = ["sample_id", "__sort_ra", "species_name"] if "sample_id" in merged.columns else ["__sort_ra", "species_name"]
+        merged = merged.sort_values(sort_cols, ascending=[True, False, True], na_position="last")
+        merged = merged.drop(columns=["__sort_ra"])
+    elif sort_cols:
+        merged = merged.sort_values(sort_cols, na_position="last")
+
+    merged = merged.reset_index(drop=True)
+
+    # Emit only the historical hit-table span: sample_id ... kmers.
+    # Missing fields are added as NaN to keep a stable schema across runs.
+    for col in SUMMARY_OUTPUT_COLS:
+        if col not in merged.columns:
+            merged[col] = np.nan
+    _taxid_as_string(merged, "species_taxid")
+    _taxid_as_string(merged, "genus_taxid")
+    merged["hit_criteria_flag"] = merged["hit_criteria_flag"].astype("string").fillna("")
+    return merged[SUMMARY_OUTPUT_COLS]
 
 
 def build_hit_table(
@@ -365,49 +589,35 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Stack per-sample TSVs
-    # abundance_df: filtered to relative_abundance >= min_abundance
-    # damage_df_filtered: filtered to n_reads >= min_damage_reads (for summary/damage output)
-    # damage_df_all: unfiltered (for species table join — keeps all damage observations)
-    abundance_df      = load_stack(args.abundance, "relative_abundance", args.min_abundance)
-    damage_df_all     = load_stack(args.damage)
-    damage_df         = damage_df_all[
-        damage_df_all["n_reads"] >= args.min_damage_reads
-    ].copy() if not damage_df_all.empty and "n_reads" in damage_df_all.columns else damage_df_all
-    coverage_df       = load_stack(args.coverage)
-
-    write_tsv(out_dir / "all_samples.abundance.tsv", abundance_df)
-    write_tsv(out_dir / "all_samples.damage.tsv",    damage_df)
-    write_tsv(out_dir / "all_samples.coverage.tsv",  coverage_df)
-
-    # Per-species table: outer join of abundance + damage (all damage rows, no abundance filter)
-    abundance_df_all = load_stack(args.abundance)
-    species_df = build_species_table(abundance_df_all, damage_df_all)
-    write_tsv(out_dir / "all_samples.species.tsv", species_df)
-
-    # Hit table: inner join of all three sources, filtered by all three criteria
-    hit_df = build_hit_table(
-        abundance_df_all,
-        damage_df_all,
-        args.damage_stats,
-        coverage_df,
-        max_damage_pvalue   = args.hit_max_damage_pvalue,
-        min_evenness        = args.hit_min_evenness,
-        min_within_genus_ra = args.hit_min_within_genus_ra,
+    abundance_df_all = load_abundance(args.abundance)
+    damage_df_all = load_damage(args.damage)
+    coverage_df = load_coverage(args.coverage)
+    damage_stats_5prime_df = load_damage_stats_5prime(args.damage_stats)
+    summary_df = build_integrated_summary(
+        abundance_df=abundance_df_all,
+        damage_df=damage_df_all,
+        damage_stats_5prime_df=damage_stats_5prime_df,
+        coverage_df=coverage_df,
+        hit_max_damage_pvalue=args.hit_max_damage_pvalue,
+        hit_min_evenness=args.hit_min_evenness,
+        hit_min_within_genus_ra=args.hit_min_within_genus_ra,
+        hit_min_classified_rate=args.hit_min_classified_rate,
     )
-    write_tsv(out_dir / "all_samples.hits.tsv", hit_df)
+    out_path = out_dir / "all_samples.summary.tsv.gz"
+    tmp_out_path = out_dir / "all_samples.summary.tsv.gz.tmp"
+    summary_df.to_csv(tmp_out_path, sep="\t", index=False, compression="gzip")
+    tmp_out_path.replace(out_path)
 
-    # Summary table
-    summary_df = build_summary(abundance_df, damage_df, coverage_df, args.fit)
-    write_tsv(out_dir / "all_samples.summary.tsv", summary_df)
-
+    n_hits = (
+        int(summary_df["hit_criteria_flag"].fillna("").eq(ALL_PASS_HIT_FLAGS).sum())
+        if not summary_df.empty
+        else 0
+    )
     print(
-        f"[aggregate_all] samples={len(summary_df)} "
-        f"abundance_rows={len(abundance_df)} "
-        f"damage_rows={len(damage_df)} "
-        f"species_rows={len(species_df)} "
-        f"hit_rows={len(hit_df)} "
-        f"coverage_rows={len(coverage_df)}",
+        f"[aggregate_all] rows={len(summary_df)} "
+        f"samples={summary_df['sample_id'].nunique() if 'sample_id' in summary_df.columns and not summary_df.empty else 0} "
+        f"hits_pass_all={n_hits} "
+        f"output={out_path}",
     )
 
 
