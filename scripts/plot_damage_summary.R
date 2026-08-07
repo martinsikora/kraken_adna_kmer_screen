@@ -37,6 +37,8 @@ script_dir <- function() {
 }
 source(file.path(script_dir(), "plot_common.R"))
 
+MARKER_ALPHA <- 0.8
+
 ALL_HIT_FLAG_TOKENS <- c(
   "damage_pvalue", "evenness_index",
   "within_genus_relative_abundance", "classified_rate"
@@ -150,13 +152,13 @@ if (identical(args$color_by, "evenness")) {
   df$fill_value <- df$evenness_index
   fill_scale <- scale_fill_viridis_c(
     option = "mako", direction = -1, limits = c(0, 1),
-    na.value = "#cccccc", name = "evenness_index"
+    alpha = MARKER_ALPHA, na.value = "#ccccccCC", name = "evenness_index"
   )
 } else {
   df$fill_value <- df$neg_log10_p
   fill_scale <- scale_fill_viridis_c(
     option = "mako", direction = -1,
-    na.value = "#cccccc", name = expression(-log[10](p))
+    alpha = MARKER_ALPHA, na.value = "#ccccccCC", name = expression(-log[10](p))
   )
 }
 
@@ -169,10 +171,14 @@ size_breaks <- c(100, 1e3, 1e4, 1e5)
 p <- ggplot(df, aes(x = .data$x, y = .data$y)) +
   geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60",
              linewidth = 0.3) +
+  # No alpha aesthetic here. R's "transparent" is white at zero alpha
+  # (255,255,255,0), and ggplot's alpha= overwrites the alpha channel of the
+  # colour as well as the fill, which turns every unoutlined marker into a
+  # white ring. Transparency is applied to the fill scale instead.
   geom_point(
     aes(fill = .data$fill_value, size = .data$log10_n,
         shape = .data$shape, colour = .data$is_full),
-    alpha = 0.8, stroke = 0.35
+    stroke = 0.35
   ) +
   fill_scale +
   scale_shape_identity() +
