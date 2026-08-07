@@ -7,7 +7,8 @@
 #   X axis : position from read end (0 = terminal k-mer)
 #   Y axis : fraction of unclassified k-mers (%)
 #
-# One page per taxon, 5' and 3' stacked in one column on a shared y range. Multiple samples can be
+# One page per taxon, 5' and 3' stacked in one column on a shared y range.
+# Line colour follows the mapDamage convention: 5' red, 3' blue. Multiple samples can be
 # overlaid by passing --profile/--global/--stats more than once.
 #
 # --stats is optional but recommended: it supplies the adaptive plateau window
@@ -218,14 +219,27 @@ build_page <- function(key) {
   spans$end <- factor(spans$end, levels = END_LEVELS)
   plats$end <- factor(plats$end, levels = END_LEVELS)
 
-  series_levels <- unique(lines$series)
-  pal <- colours[vapply(series_levels, function(s) lines$sample_i[match(s, lines$series)], integer(1))]
-  lty <- ltypes[vapply(series_levels, function(s) lines$sample_i[match(s, lines$series)], integer(1))]
-  names(pal) <- series_levels; names(lty) <- series_levels
-  lines$series <- factor(lines$series, levels = series_levels)
-  plats$series <- factor(plats$series, levels = series_levels)
-  spans$series <- factor(lines$series[match(spans$sample_i, lines$sample_i)],
-                         levels = series_levels)
+  # Per-end read counts and damage statistics are annotated inside each panel
+  # rather than carried in the series label: the label is built per
+  # (sample, end), so with a single sample it produced one legend entry per end
+  # for what is one series. A facet strip is too narrow for them when rotated.
+  ann <- do.call(rbind, lapply(END_LEVELS, function(e) {
+    lab <- unique(lines$series[lines$end == e])
+    if (length(lab) == 0L) return(NULL)
+    data.frame(end = e, label = paste(lab, collapse = "\n"), stringsAsFactors = FALSE)
+  }))
+  if (!is.null(ann)) ann$end <- factor(ann$end, levels = END_LEVELS)
+
+  # mapDamage convention: 5' in red, 3' in blue. Colour therefore encodes the
+  # read end; sample identity is carried by linetype when several are overlaid.
+  end_pal <- c(`5prime` = "#d6604d", `3prime` = "#2166ac")
+
+  sample_levels <- labels[sort(unique(lines$sample_i))]
+  lty <- ltypes[sort(unique(lines$sample_i))]
+  names(lty) <- sample_levels
+  lines$sample <- factor(labels[lines$sample_i], levels = sample_levels)
+  plats$sample <- factor(labels[plats$sample_i], levels = sample_levels)
+  spans$sample <- factor(labels[spans$sample_i], levels = sample_levels)
 
   page_title <- if (is.character(key)) key else {
     nm <- ""
@@ -239,16 +253,21 @@ build_page <- function(key) {
   ggplot(lines, aes(x = .data$position, y = .data$pct)) +
     geom_rect(data = spans, inherit.aes = FALSE,
               aes(xmin = .data$xmin, xmax = .data$xmax, ymin = -Inf, ymax = Inf,
-                  fill = .data$series),
+                  fill = .data$end),
               alpha = 0.08, show.legend = FALSE) +
-    geom_hline(data = plats, aes(yintercept = .data$yint, colour = .data$series),
+    geom_hline(data = plats, aes(yintercept = .data$yint, colour = .data$end),
                linetype = "dotted", linewidth = 0.35, alpha = 0.7,
                show.legend = FALSE) +
-    geom_line(aes(colour = .data$series, linetype = .data$series), linewidth = 0.7) +
-    geom_point(aes(colour = .data$series), size = 0.9, show.legend = FALSE) +
-    scale_colour_manual(values = pal, name = NULL) +
-    scale_fill_manual(values = pal, guide = "none") +
-    scale_linetype_manual(values = lty, name = NULL) +
+    geom_line(aes(colour = .data$end, linetype = .data$sample), linewidth = 0.7) +
+    geom_point(aes(colour = .data$end), size = 0.9, show.legend = FALSE) +
+    geom_text(data = ann, inherit.aes = FALSE,
+              aes(x = -Inf, y = Inf, label = .data$label, colour = .data$end),
+              hjust = -0.04, vjust = 1.3, size = 2.3, show.legend = FALSE) +
+    # no colour guide: each facet holds one end and the strip already names it
+    scale_colour_manual(values = end_pal, guide = "none") +
+    scale_fill_manual(values = end_pal, guide = "none") +
+    scale_linetype_manual(values = lty, name = NULL,
+                          guide = if (n_samp > 1L) "legend" else "none") +
     # Stacked in one column on a SHARED y range, and not anchored at zero.
     # Anchoring at zero left the curve using only ~20% of the panel for a
     # taxon with a high baseline unclassified rate. The range stays shared
