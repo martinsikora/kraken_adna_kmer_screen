@@ -374,6 +374,7 @@ rule plot_damage:
             --profile   {input.profile:q} \
             --global    {input.global_:q} \
             --stats     {input.stats:q} \
+            --label     {params.sample_id:q} \
             --hits      {input.hits:q} \
             --sample-id {params.sample_id:q} \
             --hits-required-flags {params.required_hit_flags:q} \
@@ -396,6 +397,7 @@ rule plot_damage:
         Rscript "{SCRIPTS_DIR}/plot_damage_fractional.R" \
             --fractional {input.frac:q} \
             --global     {input.global_:q} \
+            --label      {params.sample_id:q} \
             --hits       {input.hits:q} \
             --sample-id  {params.sample_id:q} \
             --hits-required-flags {params.required_hit_flags:q} \
