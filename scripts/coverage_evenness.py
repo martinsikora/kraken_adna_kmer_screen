@@ -22,16 +22,34 @@ species genome-length table and the per-unit summaries are supplied:
   evenness_depth = cov / (1 - exp(-depth_estimate))
   depth_estimate = reads * mean_read_length / genome_length
 
-Same Lander-Waterman ratio, but the depth comes from read count and genome
-length rather than from dup. That matters because dup*cov is inflated by the
-very clumping the index is meant to detect: at low depth 1 - exp(-dup*cov)
-collapses to dup*cov, so evenness_index reduces to 1/dup and inherits dup's
-dependence on how deeply the sample was sequenced. Measured across seven
-samples, the fraction of taxa passing evenness_index > 0.5 varies 1884-fold;
-for evenness_depth > 0.5 it varies 8.9-fold. Against interior_rate from the
-damage model (a proxy for reads not really belonging to the taxon),
-evenness_depth correlates -0.20 / -0.16 on two samples while evenness_index,
-cov and dup are all uncorrelated (|rho| <= 0.07).
+What this does and does not change. evenness_index is a correct Lander-Waterman
+ratio, and its reduction to 1/dup at low depth is the right answer there: with
+N k-mer observations spread over G positions, expected breadth is N/G, observed
+is unique/G, and the ratio is unique/N = 1/dup. The denominator G cancels, so
+ANY consistently normalised variant gives the same number. That was tested by
+renormalising with the database's own per-species k-mer counts
+(database.kdb.counts, whose clade sums reproduce kmers/cov exactly): the result
+matched evenness_index to seven decimal places, Spearman 1.000000, max absolute
+difference 9.6e-07. Changing the denominator changes nothing.
+
+evenness_depth differs for one reason only: its depth comes from bases
+sequenced (reads * mean_read_length) rather than from k-mer observations
+(dup * kmers). That is deliberately an inconsistent normalisation -- a bases
+numerator against a discriminative-k-mer denominator -- and it is where the
+behaviour comes from, not from any improvement in the depth estimate.
+
+So what it measures is closer to unique discriminative k-mers per base
+sequenced: 1/dup scaled by the fraction of each read's k-mers that discriminate
+the taxon. That fraction is small for taxa with close relatives in the database,
+which are the ones prone to misassignment, so the score blends coverage evenness
+with taxonomic distinctiveness. For screening that blend behaves better than
+evenness alone. Against interior_rate from the damage model (a proxy for reads
+not really belonging to the taxon), Spearman is -0.197 on 018345 (n=5208) and
+-0.160 on DA195 (n=2252), while evenness_index (+0.042 / +0.007), cov and dup
+are all uncorrelated and two of them carry the wrong sign. Cross-sample spread
+in pass rate is 8.9-fold against 1884-fold for evenness_index > 0.5.
+
+Read it as a screening statistic, not as a pure evenness measure.
 
 evenness_depth is emitted as an extra column and is not used by any hit
 criterion; evenness_index remains the criterion.
@@ -50,6 +68,14 @@ Near 1 the score is sound; far from 1 it is not. Hepatitis B virus sits at ~400
 Yersinia pestis sits at ~0.13, most of its genome being shared with
 Y. pseudotuberculosis and assigned above the species node. Filter on
 kmer_set_ratio before using evenness_depth.
+
+This cannot be fixed from the database as it stands. It would need the number
+of discriminative k-mers in a single representative genome, and the per-taxon
+counts do not carry it: k-mers shared across strains sit at the species node
+while strain nodes hold only strain-specific k-mers, so the per-strain counts
+are tiny and unrelated to genome size (Hepatitis B virus 64, Yersinia pestis
+207). Recovering it would mean re-deriving k-mer sets per genome from the
+database itself.
 """
 
 from __future__ import annotations
@@ -285,10 +311,12 @@ def compute_evenness_depth(
     """
     Add genome_length, depth_estimate and evenness_depth.
 
-    depth_estimate = reads * mean_read_length / genome_length, an estimate of
-    genome coverage depth that does not involve dup, so it is not inflated by
-    the clumping the ratio is testing for. Columns are NaN wherever the genome
-    length or the read length is unavailable.
+    depth_estimate = reads * mean_read_length / genome_length. Taking depth from
+    bases sequenced rather than from k-mer observations is what makes this
+    differ from evenness_index at all: a consistently normalised ratio cancels
+    its denominator and returns 1/dup whatever it is normalised by. See the
+    module docstring for what the resulting score measures. Columns are NaN
+    wherever the genome length or the read length is unavailable.
     """
     d = df.copy()
     n = len(d)

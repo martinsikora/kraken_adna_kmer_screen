@@ -108,8 +108,8 @@ def main() -> None:
     n_damage_reads = 0
     # Summed over every classified read, not only the damage window: the
     # coverage statistics this feeds are computed from all classified reads.
-    # coverage_evenness turns it into an estimate of genome coverage depth
-    # (reads * length / genome length) that does not involve dup.
+    # coverage_evenness turns it into a depth estimate taken from bases
+    # sequenced (reads * length / genome length) for its evenness_depth column.
     read_length_sum = 0
 
     print(

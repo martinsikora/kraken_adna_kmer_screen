@@ -539,16 +539,22 @@ there is, not how evenly it is spread.
 
 ## Depth-normalised evenness (`evenness_depth`)
 
-`evenness_index = cov / (1 - exp(-dup·cov))` estimates coverage depth from
-`dup·cov`. That estimate is inflated by the very clumping the ratio is meant to
-detect, and at low depth `1 - exp(-dup·cov)` collapses to `dup·cov`, so the
-index reduces to `1/dup` and inherits `dup`'s dependence on sequencing depth.
-Measured across seven samples, `evenness_index` is exactly `1/dup` (median
-evenness × median dup = 1.000–1.009), and the fraction of taxa passing
-`> 0.5` ranges from 0.02% to 42%.
+`evenness_index = cov / (1 - exp(-dup·cov))` reduces to `1/dup` at low depth —
+measured across seven samples it is exactly that (median evenness × median dup =
+1.000–1.009) — and the fraction of taxa passing `> 0.5` ranges from 0.02% to 42%
+with no biological difference behind it.
 
-`coverage.tsv` therefore also carries a second score whose depth estimate comes
-from read count and genome length instead:
+That reduction is not a defect in the formula. With `N` k-mer observations over
+`G` positions, expected breadth is `N/G`, observed is `unique/G`, and the ratio
+is `unique/N = 1/dup`. The denominator cancels, so **any consistently normalised
+variant returns the same number**. Renormalising with the database's own
+per-species k-mer counts (`database.kdb.counts`, whose clade sums reproduce
+`kmers/cov` exactly) reproduces `evenness_index` to seven decimal places —
+Spearman 1.000000, max absolute difference 9.6e-07. Changing the denominator
+achieves nothing.
+
+`coverage.tsv` therefore carries a second score that deliberately breaks that
+consistency, taking depth from bases sequenced rather than k-mer observations:
 
 ```
 depth_estimate = reads · mean_read_length / genome_length
@@ -560,18 +566,30 @@ evenness_depth = cov / (1 - exp(-depth_estimate))
 | `evenness_index > 0.5` | 1884× |
 | `evenness_depth > 0.5` | **8.9×** |
 
-More importantly it carries signal the original does not. Against
-`interior_rate` from the damage model — the model's estimate of how badly reads
-match the reference away from the termini, so a proxy for misassignment —
-Spearman correlations are:
+It also carries signal the original does not. Against `interior_rate` from the
+damage model — the model's estimate of how badly reads match the reference away
+from the termini, so a proxy for misassignment — Spearman correlations are:
 
-| | `evenness_depth` | `evenness_index` | `cov` | `dup` |
-|---|---|---|---|---|
-| 018345 (n=5206) | **−0.196** | +0.042 | +0.047 | −0.042 |
-| DA195 (n=2250) | **−0.158** | +0.007 | +0.069 | −0.010 |
+| | `evenness_depth` | `evenness_index` | k-mer-count normalised | `cov` | `dup` |
+|---|---|---|---|---|---|
+| 018345 (n=5208) | **−0.197** | +0.042 | +0.042 | +0.047 | −0.042 |
+| DA195 (n=2252) | **−0.160** | +0.007 | +0.007 | +0.069 | −0.010 |
 
 `evenness_index`, `cov` and `dup` are all uncorrelated with misassignment, and
-two of them have the wrong sign.
+two of them carry the wrong sign. The k-mer-count-normalised column is the
+consistency check above — identical to `evenness_index`, as the cancellation
+requires.
+
+**What `evenness_depth` actually measures.** Since every consistently
+normalised variant collapses to `1/dup`, the signal comes from the one
+inconsistent thing this score does: a bases-sequenced numerator against a
+discriminative-k-mer denominator. That makes it closer to *unique discriminative
+k-mers per base sequenced* — `1/dup` scaled by the fraction of each read's
+k-mers that discriminate the taxon. That fraction is small for taxa with close
+relatives in the database, which are exactly the misassignment-prone ones, so
+the score blends coverage evenness with taxonomic distinctiveness. For screening
+that blend behaves better than evenness alone, but read it as a screening
+statistic rather than a pure evenness measure.
 
 **Requirements.** Needs `species_genome_lengths` in the config (built once per
 database by `scripts/build_species_genome_lengths.py` from the database's
@@ -593,8 +611,13 @@ of taxa fall in 0.5–2. The failures are informative:
   *Y. pseudotuberculosis* and assigned above the species node.
 
 Filter on `kmer_set_ratio` before comparing `evenness_depth` across species.
-Fixing this properly needs discriminative-k-mer counts per representative
-genome, which sequence lengths alone cannot provide.
+
+This cannot be fixed from the database as it stands. It needs the number of
+discriminative k-mers in a *single* representative genome, and the per-taxon
+counts do not carry it: k-mers shared across strains sit at the species node
+while strain nodes hold only strain-specific k-mers, so the per-strain counts
+are tiny and unrelated to genome size (Hepatitis B virus 64, *Y. pestis* 207).
+Recovering it would mean re-deriving k-mer sets per genome from the database.
 
 `evenness_depth` is an additional column and is **not** used by any hit
 criterion; `evenness_index` remains the criterion.

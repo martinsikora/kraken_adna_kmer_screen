@@ -288,7 +288,7 @@ rule coverage_evenness:
     input:
         reports = get_unit_reports,
         # Only for the sample's mean classified read length, which turns
-        # evenness_depth's depth estimate into something independent of dup.
+        # evenness_depth's depth estimate, which is taken from bases sequenced.
         # These are small persistent files, not the temp() arrays.
         summaries = get_sample_summaries,
     output:
