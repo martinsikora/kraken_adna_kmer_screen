@@ -362,6 +362,7 @@ rule plot_damage:
         required_hit_flags       = damage_plot_required_hit_flags(),
         max_keys                 = int(config.get("damage_plot_max_keys", 200)),
         color_by                 = config.get("damage_plot_color_by", "evenness"),
+        strata                   = damage_strata_args(),
     resources:
         mem_mb   = config["resources"]["plot_damage"]["mem_mb"],
         runtime  = config["resources"]["plot_damage"]["runtime"],
@@ -399,6 +400,7 @@ rule plot_damage:
             --sample-id  {params.sample_id:q} \
             --hits-required-flags {params.required_hit_flags:q} \
             --max-keys  {params.max_keys} \
+            --strata     {params.strata:q} \
             --output     {output.frac_pdf:q} \
             2>> {log:q}
         """
