@@ -7,7 +7,7 @@
 #   X axis : position from read end (0 = terminal k-mer)
 #   Y axis : fraction of unclassified k-mers (%)
 #
-# One page per taxon, faceted into 5' and 3' panels. Multiple samples can be
+# One page per taxon, 5' and 3' stacked in one column on a shared y range. Multiple samples can be
 # overlaid by passing --profile/--global/--stats more than once.
 #
 # --stats is optional but recommended: it supplies the adaptive plateau window
@@ -249,9 +249,14 @@ build_page <- function(key) {
     scale_colour_manual(values = pal, name = NULL) +
     scale_fill_manual(values = pal, guide = "none") +
     scale_linetype_manual(values = lty, name = NULL) +
-    facet_wrap(~ end, nrow = 1, labeller = labeller(end = END_LABELS)) +
+    # Stacked in one column on a SHARED y range, and not anchored at zero.
+    # Anchoring at zero left the curve using only ~20% of the panel for a
+    # taxon with a high baseline unclassified rate. The range stays shared
+    # across ends because 5' vs 3' asymmetry is diagnostic and free scales
+    # would make both panels fill their box identically, hiding it.
+    facet_grid(end ~ ., switch = "y", labeller = labeller(end = END_LABELS)) +
     coord_cartesian(xlim = c(-0.5, args$max_pos - 0.5)) +
-    expand_limits(y = 0) +
+    scale_y_continuous(expand = expansion(mult = 0.08)) +
     labs(
       title = paste("aDNA damage profiles —", page_title),
       x = "Position from read end",
@@ -262,14 +267,15 @@ build_page <- function(key) {
       )
     ) +
     theme_screen() +
-    theme(legend.position = "top", legend.direction = "vertical")
+    theme(legend.position = "top", legend.direction = "vertical",
+          panel.spacing.y = unit(0.5, "lines"), strip.placement = "outside")
 }
 
 # ---------------------------------------------------------------------------
 # Write multi-page PDF
 # ---------------------------------------------------------------------------
 
-open_pdf_device(args$output, width = 11, height = 4.4)
+open_pdf_device(args$output, width = 7.5, height = 6.4)
 
 pages <- 0L
 for (k in keys) {

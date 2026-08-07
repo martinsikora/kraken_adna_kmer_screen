@@ -8,10 +8,10 @@
 #   X axis : fractional position along the read (0 = 5', 1 = 3')
 #   Y axis : fraction of unclassified k-mers (%)
 #
-# One page per taxon, one facet per read-length stratum. Stratifying by read
-# length separates genuine terminal damage (present in all strata) from the
-# read-length artifact, where short reads have overlapping damage zones and no
-# flat interior.
+# One page per taxon, strata stacked in one column with free y scales.
+# Stratifying by read length separates genuine terminal damage (present in all
+# strata) from the read-length artifact, where short reads have overlapping
+# damage zones and no flat interior.
 # ---------------------------------------------------------------------------
 
 suppressPackageStartupMessages({
@@ -212,9 +212,13 @@ build_page <- function(key) {
     geom_line(linewidth = 0.7, alpha = 0.9) +
     scale_colour_manual(values = pal, name = NULL) +
     scale_linetype_manual(values = lty, name = NULL) +
-    facet_wrap(~ stratum, ncol = 2, scales = "free_y") +
-    scale_x_continuous(limits = c(0, 1)) +
-    expand_limits(y = 0) +
+    # Stacked in one column with per-stratum y ranges, not anchored at zero.
+    # Strata are independent measurements at different read lengths, so free
+    # scales cost little; anchoring at zero left the curve using a fifth to a
+    # third of each panel whenever the baseline unclassified rate was high.
+    facet_grid(stratum ~ ., scales = "free_y", switch = "y") +
+    scale_x_continuous(limits = c(0, 1), expand = expansion(mult = 0.01)) +
+    scale_y_continuous(expand = expansion(mult = 0.08)) +
     labs(
       title = "aDNA damage profiles — fractional position by read length",
       subtitle = as.character(key),
@@ -226,15 +230,16 @@ build_page <- function(key) {
       )
     ) +
     theme_screen() +
-    theme(legend.position = "top", legend.direction = "vertical")
+    theme(legend.position = "top", legend.direction = "vertical",
+          panel.spacing.y = unit(0.5, "lines"), strip.placement = "outside")
 }
 
 # ---------------------------------------------------------------------------
 # Write multi-page PDF
 # ---------------------------------------------------------------------------
 
-n_rows_facets <- ceiling(length(strata) / 2)
-open_pdf_device(args$output, width = 11, height = max(4.2, 3.1 * n_rows_facets))
+open_pdf_device(args$output, width = 7.5,
+                height = max(5, 1.9 * length(strata) + 1.6))
 
 pages <- 0L
 for (k in keys) {
