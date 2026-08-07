@@ -71,6 +71,8 @@ directories are shared across all datasets.
 | scipy | ≥ 1.9 |
 | pandas | ≥ 1.5 |
 | matplotlib | ≥ 3.6 |
+| R | ≥ 4.2 (plotting only) |
+| R: ggplot2, ggrepel, readr, dplyr, scales, viridisLite | current |
 | [KrakenUniq](https://github.com/fbreitwieser/krakenuniq) | ≥ 1.0 (for generating inputs) |
 
 Install Python dependencies:
@@ -79,6 +81,15 @@ Install Python dependencies:
 pip install snakemake numpy scipy pandas matplotlib
 # or with conda:
 conda install -c bioconda -c conda-forge snakemake numpy scipy pandas matplotlib
+```
+
+The damage plots are produced by R scripts (`scripts/plot_damage_*.R`); the rest
+of the workflow is Python. Install the R side with:
+
+```bash
+conda install -c conda-forge r-base r-ggplot2 r-ggrepel r-readr r-dplyr r-scales r-viridislite
+# or from within R:
+install.packages(c("ggplot2", "ggrepel", "readr", "dplyr", "scales", "viridisLite"))
 ```
 
 ---
@@ -387,9 +398,13 @@ Three PDFs are produced per sample:
   are annotated. One page per species.
 
 - **`damage_summary.pdf`** — Scatter plot of all profiled taxa. X axis: baseline
-  classified k-mer rate; Y axis: damage score (%). Point size = log₁₀(reads); colour
-  = −log₁₀(p-value). Triangles = significant. Only selected hit species are
-  annotated.
+  classified k-mer rate; Y axis: damage score (%). Point size = log₁₀(reads);
+  colour = `evenness_index` on a fixed 0–1 scale (grey where unavailable).
+  Triangles = significant. Only selected hit species are annotated.
+  Set `damage_plot_color_by: pvalue` to colour by −log₁₀(p-value) instead.
+  Colouring by evenness adds information the plot does not already carry — both
+  axes and the marker shape are damage-derived, whereas evenness reports whether
+  coverage is genome-wide or clumped.
 
 - **`damage_fractional.pdf`** — Fractional-position profiles (0 = 5′, 1 = 3′) for
   hit species, stratified by read-length. Shows the U-shaped overlap artifact in

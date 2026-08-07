@@ -351,6 +351,7 @@ rule plot_damage:
         global_  = "results/samples/{sample_id}/{sample_id}.damage_global.tsv",
         frac     = "results/samples/{sample_id}/{sample_id}.damage_fractional_profile.tsv",
         hits     = "results/summary/all_samples.summary.tsv.gz",
+        coverage = "results/samples/{sample_id}/{sample_id}.coverage.tsv",
     output:
         profile_pdf  = "results/samples/{sample_id}/{sample_id}.damage_profile.pdf",
         summary_pdf  = "results/samples/{sample_id}/{sample_id}.damage_summary.pdf",
@@ -360,6 +361,7 @@ rule plot_damage:
         max_pos                  = config["damage_max_pos"],
         required_hit_flags       = damage_plot_required_hit_flags(),
         max_keys                 = int(config.get("damage_plot_max_keys", 200)),
+        color_by                 = config.get("damage_plot_color_by", "evenness"),
     resources:
         mem_mb   = config["resources"]["plot_damage"]["mem_mb"],
         runtime  = config["resources"]["plot_damage"]["runtime"],
@@ -367,7 +369,7 @@ rule plot_damage:
         "logs/samples/{sample_id}.plot_damage.log"
     shell:
         """
-        python "{SCRIPTS_DIR}/plot_damage_profile.py" \
+        Rscript "{SCRIPTS_DIR}/plot_damage_profile.R" \
             --profile   {input.profile:q} \
             --global    {input.global_:q} \
             --stats     {input.stats:q} \
@@ -379,16 +381,18 @@ rule plot_damage:
             --max-pos   {params.max_pos} \
             2>> {log:q}
 
-        python "{SCRIPTS_DIR}/plot_damage_summary.py" \
+        Rscript "{SCRIPTS_DIR}/plot_damage_summary.R" \
             --stats                    {input.stats:q} \
             --hits                     {input.hits:q} \
             --sample-id                {params.sample_id:q} \
             --hits-required-flags      {params.required_hit_flags:q} \
             --max-keys                 {params.max_keys} \
+            --coverage                 {input.coverage:q} \
+            --color-by                 {params.color_by:q} \
             --output                   {output.summary_pdf:q} \
             2>> {log:q}
 
-        python "{SCRIPTS_DIR}/plot_damage_fractional.py" \
+        Rscript "{SCRIPTS_DIR}/plot_damage_fractional.R" \
             --fractional {input.frac:q} \
             --global     {input.global_:q} \
             --hits       {input.hits:q} \

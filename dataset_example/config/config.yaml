@@ -80,6 +80,13 @@ damage_plot_required_hit_flags:
 # Maximum number of taxa/pages in each damage plot PDF
 damage_plot_max_keys: 200
 
+# Point colour in damage_summary.pdf:
+#   evenness - evenness_index (0-1), separates genome-wide coverage from
+#              reads piled on a conserved region; independent of the damage
+#              signal already shown by the axes and marker shape
+#   pvalue   - -log10(damage p-value), the previous behaviour
+damage_plot_color_by: evenness   # evenness | pvalue
+
 # ---------------------------------------------------------------------------
 # Coverage evenness
 # ---------------------------------------------------------------------------
