@@ -7,7 +7,7 @@ output. For each sample the workflow jointly estimates:
 1. **Species/genus relative abundances** via non-negative least squares (NNLS) fitting
    against a pre-built k-mer fingerprint reference matrix.
 2. **aDNA damage profiles** by tracking the fraction of unclassified k-mers at read
-   termini, stratified by read length.
+   termini, both pooled and split by read-length stratum.
 3. **Coverage evenness** (Lander-Waterman index) from KrakenUniq k-mer coverage statistics.
 
 Both the abundance vector and the damage accumulator are built in a **single streaming
@@ -34,7 +34,6 @@ All samples:
 Per sample (auto):
   damage TSVs + integrated summary flags ──► plot_damage ──► damage_profile.pdf
                                             ──► damage_summary.pdf
-                                            ──► damage_fractional.pdf
 ```
 
 ---
@@ -249,15 +248,44 @@ Key parameters:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `damage_max_pos` | `25` | Positions from read end to profile |
+| `damage_min_read_length` | `30` | Reads shorter than this are excluded from damage estimation |
+| `damage_max_read_length` | `75` | Reads longer than this are excluded (see below) |
+| `damage_max_pos` | `10` | Positions from read end to profile |
 | `damage_min_reads` | `100` | Minimum reads to compute damage statistics |
-| `damage_n_bins` | `50` | Bins for fractional-position profiles |
 | `damage_adaptive_plateau` | `true` | Auto-detect plateau window per taxon |
 | `damage_plateau_search_start` | `3` | Plateau search window start (positions from end) |
-| `damage_plateau_search_end` | `10` | Plateau search window end |
-| `damage_strata` | `["31-55","56-75","76-100"]` | Read-length strata (bp); `plot_damage_fractional.R` can sum stored strata into wider bins without re-screening |
+| `damage_plateau_search_end` | `9` | Plateau search window end (must be < `damage_max_pos`) |
+| `damage_strata` | `["30-55","56-75"]` | Read-length strata for the damage profile, inside the damage length window |
 | `damage_plot_required_hit_flags` | `["damage_pvalue","within_genus_relative_abundance","classified_rate"]` | Required hit tokens for selecting taxa in damage plots |
 | `damage_plot_max_keys` | `200` | Max taxa/pages per damage plot PDF |
+
+#### Read-length window for damage
+
+Damage is estimated only from reads within
+`damage_min_read_length` … `damage_max_read_length`. Abundance, coverage and
+evenness use all reads; only the damage accumulators are gated.
+
+**Upper bound.** It must sit below the shortest sequencing read length used for
+the sample. A read at the read-length cap is a truncated molecule: its 3′ end is
+a sequencing cut-off rather than a molecule terminus, so it carries no terminal
+damage and dilutes the 3′ estimate. On a 100 bp run the 3′ terminal excess falls
+from ~+4.4 percentage points for reads under 95 bp to +0.3 at 98–99 bp, so the
+contamination begins a couple of bases below the cap rather than at it. Pooling
+lanes of different read length also mixes different cap positions into a single
+profile, which the fixed window avoids.
+
+**Lower bound.** With k-mer size *k*, a read reaches k-mer position *j* only if
+its length is at least *k + j*. Positions beyond that are computed from
+progressively fewer — and longer — reads, and longer reads carry systematically
+higher unclassified rates, which biases the plateau upward. Keep
+`damage_max_pos` small enough that most reads in the window reach the last
+profiled position: at the defaults (`30`–`75`, k=29) roughly 84% of reads reach
+position 10.
+
+Narrowing the window costs reads: at the defaults about 57% of a typical
+library is retained for damage. Lower `damage_min_read_length` for heavily
+fragmented libraries, and raise `damage_max_read_length` only if every lane of
+every sample was sequenced longer than it.
 
 ### Coverage evenness
 
@@ -355,11 +383,10 @@ The integrated summary table and per-sample damage PDFs are built by the default
 | `{sample_id}.damage_global.tsv` | Per-species damage scores (summary) |
 | `{sample_id}.damage_stats.tsv` | Per-species per-end damage statistics and plateau estimates |
 | `{sample_id}.damage_profile.tsv` | Per-species absolute-position damage profiles |
-| `{sample_id}.damage_fractional_profile.tsv` | Per-species fractional-position profiles by read-length stratum |
+| `{sample_id}.damage_profile_stratified.tsv` | Per-species absolute-position profiles split by read-length stratum |
 | `{sample_id}.coverage.tsv` | Per-taxon coverage and evenness statistics |
 | `{sample_id}.damage_profile.pdf` | Absolute-position damage plots (hit species) |
 | `{sample_id}.damage_summary.pdf` | Damage biplot across all profiled taxa |
-| `{sample_id}.damage_fractional.pdf` | Fractional-position plots by read-length stratum (hit species) |
 
 ### Workflow-level summary (`results/summary/`)
 
@@ -406,9 +433,6 @@ Three PDFs are produced per sample:
   axes and the marker shape are damage-derived, whereas evenness reports whether
   coverage is genome-wide or clumped.
 
-- **`damage_fractional.pdf`** — Fractional-position profiles (0 = 5′, 1 = 3′) for
-  hit species, stratified by read-length. Shows the U-shaped overlap artifact in
-  short reads and the flat interior plateau in longer reads. One page per species.
 
 ---
 

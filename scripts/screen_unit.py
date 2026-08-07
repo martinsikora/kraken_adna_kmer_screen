@@ -6,7 +6,8 @@ Single-pass analysis of one KrakenUniq classify file (.tsv.gz).
 
 In one streaming pass through the (potentially large) compressed input:
   1. Builds a sparse feature vector for NNLS abundance estimation
-  2. Accumulates aDNA damage profiles (absolute and fractional position)
+  2. Accumulates aDNA damage profiles by position from each read end,
+     pooled and split by read-length stratum
 
 Outputs:
   --out-vector        {unit_id}.vector.npz           sparse NNLS feature vector
@@ -34,7 +35,6 @@ from kraken_screen_lib import (
     save_damage_arrays,
     write_tsv,
     DamageAccumulator,
-    FractionalAccumulator,
     open_buffered_gzip,
 )
 
@@ -55,8 +55,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--exclude-taxids",     nargs="+", type=int, default=[0, 1, 2, 131567],
                         help="Taxids to exclude from feature vector (always includes 0)")
     parser.add_argument("--max-pos",            type=int, default=25)
-    parser.add_argument("--n-bins",             type=int, default=100)
     parser.add_argument("--strata",             nargs="+", default=["31-40", "41-55", "56-75", "76-100"])
+    parser.add_argument("--min-read-length",    type=int, default=30,
+                        help="Reads shorter than this are excluded from damage "
+                             "accumulation (abundance is unaffected)")
+    parser.add_argument("--max-read-length",    type=int, default=75,
+                        help="Reads longer than this are excluded from damage "
+                             "accumulation. Set below the shortest sequencing read "
+                             "length in the run so that every retained read is a "
+                             "complete molecule: a read at the read-length cap has "
+                             "been truncated, so its 3' end is a sequencing cut-off "
+                             "and carries no terminal damage")
     parser.add_argument("--progress-every",     type=int, default=1_000_000)
     return parser.parse_args()
 
@@ -84,8 +93,7 @@ def main() -> None:
 
     # Initialise accumulators
     strata = parse_strata_spec(args.strata)
-    damage_acc = DamageAccumulator(max_pos=args.max_pos)
-    frac_acc   = FractionalAccumulator(strata=strata, n_bins=args.n_bins)
+    damage_acc = DamageAccumulator(max_pos=args.max_pos, strata=strata)
 
     # Feature vector accumulation
     feature_counts: dict[int, float] = {}
@@ -97,6 +105,7 @@ def main() -> None:
     retained_mass = 0.0
     unclassified_mass = 0.0
     n_species_accumulated: set[str] = set()
+    n_damage_reads = 0
 
     print(
         f"[screen_unit] starting: {args.kraken_class}",
@@ -119,6 +128,12 @@ def main() -> None:
                 kmer_str, exclude_set
             )
 
+            if damage_acc.kmer_size == 0 and nk > 0:
+                try:
+                    damage_acc.kmer_size = int(length_str) - nk + 1
+                except ValueError:
+                    pass
+
             # Track all parsed k-mer mass (including excluded taxa and "A" tokens)
             total_mass += float(nk)
             unclassified_mass += float(unc)
@@ -139,15 +154,24 @@ def main() -> None:
                     read_len = int(length_str)
                 except ValueError:
                     continue
+                # Damage is estimated only from reads within the length window.
+                # Reads at the sequencing read-length cap are truncated molecules
+                # whose 3' end is not a molecule terminus, and pooling lanes with
+                # different read lengths otherwise mixes different cap positions
+                # into one profile.
+                if not (args.min_read_length <= read_len <= args.max_read_length):
+                    continue
                 species_info = child_to_species.get(taxid)
                 if species_info is not None:
                     _, species_name = species_info
                     if nk > 0:
+                        n_damage_reads += 1
                         n5 = min(nk, args.max_pos)
                         head, tail = end_flags_from_runs(tids, counts, n5)
-                        damage_acc.add_flags(species_name, n5, head, tail)
-                        frac_acc.add_runs(species_name, read_len, tids, counts,
-                                          nk, unc > 0)
+                        damage_acc.add_flags(
+                            species_name, n5, head, tail,
+                            stratum_idx=damage_acc.stratum_index(read_len),
+                        )
                         n_species_accumulated.add(species_name)
 
             if args.progress_every > 0 and n_rows % args.progress_every == 0:
@@ -161,7 +185,10 @@ def main() -> None:
     elapsed = time.perf_counter() - start
     print(
         f"[screen_unit] done: rows={n_rows:,} elapsed_s={elapsed:.1f} "
-        f"features={len(feature_counts):,} species={len(n_species_accumulated):,}",
+        f"features={len(feature_counts):,} species={len(n_species_accumulated):,} "
+        f"damage_reads={n_damage_reads:,} "
+        f"(length {args.min_read_length}-{args.max_read_length}, "
+        f"k={damage_acc.kmer_size})",
         file=sys.stderr, flush=True,
     )
 
@@ -176,7 +203,7 @@ def main() -> None:
     save_sparse_vector(args.out_vector, indices, data, n_features)
 
     # Save damage accumulator state
-    save_damage_arrays(args.out_damage_arrays, damage_acc, frac_acc)
+    save_damage_arrays(args.out_damage_arrays, damage_acc)
 
     # Save summary
     write_tsv(
@@ -189,6 +216,10 @@ def main() -> None:
             "unclassified_feature_mass": unclassified_mass,
             "n_retained_features":      len(feature_counts),
             "n_species_accumulated":    len(n_species_accumulated),
+            "damage_reads_in_window":   n_damage_reads,
+            "damage_min_read_length":   args.min_read_length,
+            "damage_max_read_length":   args.max_read_length,
+            "kmer_size":                damage_acc.kmer_size,
             "elapsed_seconds":          elapsed,
         }]),
     )

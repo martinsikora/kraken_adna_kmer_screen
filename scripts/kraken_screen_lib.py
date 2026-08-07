@@ -8,7 +8,7 @@ Combines:
 - Utility functions from kraken_abundance.py (prototype 1)
 - Taxonomy loaders adapted for the new column schema
   (tax_rank, tax_id, tax_name, tax_ids_descendant)
-- DamageAccumulator / FractionalAccumulator logic used by
+- DamageAccumulator logic used by
   screen_unit.py and aggregate_sample.py
 - Unified kmer string parser for single-pass vectorize+damage accumulation
 - Damage array serialization / deserialization helpers
@@ -21,6 +21,7 @@ import csv
 import gzip
 import io
 import json
+import sys
 import math
 from collections import defaultdict
 from pathlib import Path
@@ -401,7 +402,7 @@ def build_feature_lookup(path: str | Path) -> Dict[int, int]:
 
 # ---------------------------------------------------------------------------
 # aDNA damage accumulation classes
-# Shared accumulator implementation used by workflow damage scripts.
+# Shared accumulator implementation used by the workflow damage scripts.
 # ---------------------------------------------------------------------------
 
 def parse_strata_spec(specs: list[str]) -> list[tuple[int, int]]:
@@ -413,145 +414,6 @@ def parse_strata_spec(specs: list[str]) -> list[tuple[int, int]]:
     return result
 
 
-class FractionalAccumulator:
-    """
-    Accumulates fractional-position k-mer counts per read-length stratum.
-
-    Key may be an int taxid or a str species name.
-
-    Per key:
-      frac_total  shape (n_strata, n_bins)  total k-mers per fractional bin
-      frac_unc    shape (n_strata, n_bins)  unclassified k-mers per bin
-      read_counts shape (n_strata,)         reads per stratum
-    """
-
-    def __init__(self, strata: list[tuple[int, int]], n_bins: int = 100):
-        self.strata = strata
-        self.n_bins = n_bins
-        self._total: dict = {}
-        self._unc:   dict = {}
-        self._reads: dict = {}
-        self._F_cache: dict = {}
-
-    def _init(self, key):
-        ns = len(self.strata)
-        self._total[key] = np.zeros((ns, self.n_bins), dtype=np.int64)
-        self._unc[key]   = np.zeros((ns, self.n_bins), dtype=np.int64)
-        self._reads[key] = np.zeros(ns,                dtype=np.int64)
-
-    def _stratum_idx(self, length: int) -> int:
-        for i, (lo, hi) in enumerate(self.strata):
-            if lo <= length <= hi:
-                return i
-        return -1
-
-    def add_read(self, key, read_len: int, kmers: np.ndarray):
-        s = self._stratum_idx(read_len)
-        if s < 0:
-            return
-        nk = len(kmers)
-        if nk < 2:
-            return
-        if key not in self._total:
-            self._init(key)
-        self._reads[key][s] += 1
-        fracs = np.arange(nk) / (nk - 1)
-        bis   = np.minimum((fracs * self.n_bins).astype(int), self.n_bins - 1)
-        np.add.at(self._total[key][s], bis, 1)
-        np.add.at(self._unc[key][s],   bis, (kmers == 0).astype(np.int64))
-
-    def _F(self, nk: int) -> np.ndarray:
-        """
-        Cumulative fractional-bin table for reads of nk k-mers.
-
-        F[x] is the bin histogram of positions [0, x), so a contiguous run
-        [a, b) contributes exactly F[b] - F[a]. Depends only on nk, and aDNA
-        reads span few distinct nk, so this is computed once per length and
-        reused. Shape (nk+1, n_bins).
-        """
-        F = self._F_cache.get(nk)
-        if F is None:
-            fracs = np.arange(nk) / (nk - 1)
-            bis   = np.minimum((fracs * self.n_bins).astype(int), self.n_bins - 1)
-            F = np.zeros((nk + 1, self.n_bins), dtype=np.int64)
-            for i, b in enumerate(bis):
-                F[i + 1] = F[i]
-                F[i + 1, b] += 1
-            F.flags.writeable = False
-            self._F_cache[nk] = F
-        return F
-
-    def add_runs(self, key, read_len: int, tids, counts, nk: int, has_unc: bool):
-        """
-        Run-length equivalent of add_read. Produces bit-identical state without
-        visiting individual k-mer positions: totals come from F[nk], and each
-        unclassified run [a, b) adds F[b] - F[a].
-        """
-        s = self._stratum_idx(read_len)
-        if s < 0:
-            return
-        if nk < 2:
-            return
-        if key not in self._total:
-            self._init(key)
-        self._reads[key][s] += 1
-
-        F = self._F(nk)
-        self._total[key][s] += F[nk]
-
-        if not has_unc:
-            return
-        acc = None
-        pos = 0
-        for t, c in zip(tids, counts):
-            if t == 0 and c > 0:
-                seg = F[pos + c] - F[pos]
-                acc = seg if acc is None else acc + seg
-            pos += c
-        if acc is not None:
-            self._unc[key][s] += acc
-
-    def to_dataframe(self, min_reads: int = 1) -> pd.DataFrame:
-        """
-        Export fractional profiles for keys with at least `min_reads` total reads
-        across all configured strata. Per-stratum rows are emitted whenever a
-        stratum has at least one read.
-        """
-        rows = []
-        for key in self._total:
-            is_int = isinstance(key, int)
-            total_reads = int(self._reads[key].sum())
-            if total_reads < min_reads:
-                continue
-            for s_idx, (lo, hi) in enumerate(self.strata):
-                n_reads = int(self._reads[key][s_idx])
-                if n_reads == 0:
-                    continue
-                tot_arr = self._total[key][s_idx]
-                unc_arr = self._unc[key][s_idx]
-                for b in range(self.n_bins):
-                    tot = int(tot_arr[b])
-                    if tot == 0:
-                        continue
-                    unc = int(unc_arr[b])
-                    rows.append({
-                        "taxid":             key if is_int else pd.NA,
-                        "species_name":      ""  if is_int else key,
-                        "stratum":           f"{lo}-{hi}",
-                        "bin":               b,
-                        "n_reads":           n_reads,
-                        "n_total":           tot,
-                        "n_unclassified":    unc,
-                        "frac_unclassified": unc / tot,
-                    })
-        if not rows:
-            return pd.DataFrame(columns=[
-                "taxid", "species_name", "stratum", "bin",
-                "n_reads", "n_total", "n_unclassified", "frac_unclassified",
-            ])
-        return pd.DataFrame(rows)
-
-
 class DamageAccumulator:
     """
     Accumulates per-position unclassified k-mer counts across reads.
@@ -560,18 +422,47 @@ class DamageAccumulator:
     Storage: _5[key] / _3[key] each shape (max_pos, 2)
       column 0 = total k-mers at that position
       column 1 = unclassified k-mers at that position
+
+    When strata are supplied the same counts are additionally kept split by
+    read-length stratum in _s5 / _s3, shape (n_strata, max_pos, 2). The pooled
+    arrays remain the sum over strata plus any read outside every stratum, so
+    every existing consumer -- profile(), raw(), compute_damage_stats(),
+    to_dataframe() -- is unaffected. The split exists because a read reaches
+    k-mer position j only if its length is at least k + j, so a pooled profile
+    silently changes its read composition along the x axis.
     """
 
-    def __init__(self, max_pos: int = 25):
+    def __init__(self, max_pos: int = 25, strata: list | None = None,
+                 kmer_size: int = 0):
         self.max_pos = max_pos
+        self.strata = list(strata) if strata else []
+        # k is not stated anywhere in the classify file, but follows from any
+        # read: n_kmers = length - k + 1. Recording it lets the damage plot
+        # label each k-mer index with the read bases it spans.
+        self.kmer_size = int(kmer_size)
         self._5: dict = {}
         self._3: dict = {}
         self._n: dict = {}
+        self._s5: dict = {}
+        self._s3: dict = {}
+        self._sn: dict = {}
+
+    def stratum_index(self, read_len: int) -> int:
+        """Index of the stratum containing read_len, or -1."""
+        for i, (lo, hi) in enumerate(self.strata):
+            if lo <= read_len <= hi:
+                return i
+        return -1
 
     def _init_key(self, key):
         self._5[key] = np.zeros((self.max_pos, 2), dtype=np.int64)
         self._3[key] = np.zeros((self.max_pos, 2), dtype=np.int64)
         self._n[key] = 0
+        ns = len(self.strata)
+        if ns:
+            self._s5[key] = np.zeros((ns, self.max_pos, 2), dtype=np.int64)
+            self._s3[key] = np.zeros((ns, self.max_pos, 2), dtype=np.int64)
+            self._sn[key] = np.zeros(ns, dtype=np.int64)
 
     def add_read(self, key, kmers: np.ndarray):
         nk = len(kmers)
@@ -591,11 +482,15 @@ class DamageAccumulator:
         self._3[key][:n5, 0] += 1
         self._3[key][:n5, 1] += (tail == 0).astype(np.int64)
 
-    def add_flags(self, key, n5: int, head: np.ndarray, tail: np.ndarray):
+    def add_flags(self, key, n5: int, head: np.ndarray, tail: np.ndarray,
+                  stratum_idx: int = -1):
         """
         Run-length equivalent of add_read: takes precomputed unclassified flags
         for the first and last n5 positions (3' already reversed) instead of the
         expanded k-mer array. State and arithmetic are identical to add_read.
+
+        stratum_idx, when >= 0, also books the read into that read-length
+        stratum; the pooled arrays are updated either way.
         """
         if n5 == 0:
             return
@@ -606,6 +501,12 @@ class DamageAccumulator:
         self._5[key][:n5, 1] += head
         self._3[key][:n5, 0] += 1
         self._3[key][:n5, 1] += tail
+        if stratum_idx >= 0 and key in self._s5:
+            self._s5[key][stratum_idx, :n5, 0] += 1
+            self._s5[key][stratum_idx, :n5, 1] += head
+            self._s3[key][stratum_idx, :n5, 0] += 1
+            self._s3[key][stratum_idx, :n5, 1] += tail
+            self._sn[key][stratum_idx] += 1
 
     def taxids(self):
         return list(self._5.keys())
@@ -649,11 +550,50 @@ class DamageAccumulator:
                         "n_kmers":           total,
                         "n_unclassified":    int(arr[pos, 1]),
                         "frac_unclassified": frac[pos],
+                        "kmer_size":         self.kmer_size,
                     })
         return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
             "taxid", "species_name", "end", "position",
             "n_reads", "n_kmers", "n_unclassified", "frac_unclassified",
+            "kmer_size",
         ])
+
+    def to_dataframe_stratified(self, min_reads: int = 100) -> pd.DataFrame:
+        """Same as to_dataframe but split by read-length stratum."""
+        cols = ["taxid", "species_name", "stratum", "end", "position",
+                "n_reads", "n_kmers", "n_unclassified", "frac_unclassified",
+                "kmer_size"]
+        if not self.strata:
+            return pd.DataFrame(columns=cols)
+        rows = []
+        for key in self.taxids():
+            if self._n[key] < min_reads or key not in self._s5:
+                continue
+            is_int = isinstance(key, int)
+            for si, (lo, hi) in enumerate(self.strata):
+                nr = int(self._sn[key][si])
+                if nr == 0:
+                    continue
+                for end, arr in (("5prime", self._s5[key][si]),
+                                 ("3prime", self._s3[key][si])):
+                    for pos in range(self.max_pos):
+                        total = int(arr[pos, 0])
+                        if total == 0:
+                            continue
+                        unc = int(arr[pos, 1])
+                        rows.append({
+                            "taxid":             key if is_int else pd.NA,
+                            "species_name":      ""  if is_int else key,
+                            "stratum":           f"{lo}-{hi}",
+                            "end":               end,
+                            "position":          pos,
+                            "n_reads":           nr,
+                            "n_kmers":           total,
+                            "n_unclassified":    unc,
+                            "frac_unclassified": unc / total,
+                            "kmer_size":         self.kmer_size,
+                        })
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=cols)
 
 
 # ---------------------------------------------------------------------------
@@ -902,92 +842,84 @@ def compute_damage_stats(
 def save_damage_arrays(
     path: str | Path,
     damage_acc: DamageAccumulator,
-    frac_acc: FractionalAccumulator,
 ) -> None:
     """
-    Save DamageAccumulator + FractionalAccumulator state to a compressed npz file.
+    Save DamageAccumulator state to a compressed npz file.
 
     Keys are JSON-encoded as a UTF-8 byte array. Per-key arrays are stored
-    under 'd5_i', 'd3_i', 'dn_i' (damage) and 'ft_i', 'fu_i', 'fr_i' (fractional).
+    under 'd5_i', 'd3_i', 'dn_i' (pooled over read length) and, when the
+    accumulator carries strata, 's5_i', 's3_i', 'sn_i' (split by stratum).
     """
     keys = list(damage_acc._5.keys())
     save_dict: dict = {
         "keys":     np.frombuffer(json.dumps(keys).encode("utf-8"), dtype=np.uint8),
         "max_pos":  np.array([damage_acc.max_pos], dtype=np.int64),
-        "n_bins":   np.array([frac_acc.n_bins],    dtype=np.int64),
-        "strata":   np.frombuffer(json.dumps(frac_acc.strata).encode("utf-8"), dtype=np.uint8),
+        "strata":   np.frombuffer(
+            json.dumps(damage_acc.strata).encode("utf-8"), dtype=np.uint8),
+        "kmer_size": np.array([getattr(damage_acc, "kmer_size", 0)], dtype=np.int64),
     }
     for i, key in enumerate(keys):
         save_dict[f"d5_{i}"] = damage_acc._5[key]
         save_dict[f"d3_{i}"] = damage_acc._3[key]
         save_dict[f"dn_{i}"] = np.array([damage_acc._n[key]], dtype=np.int64)
-        if key in frac_acc._total:
-            save_dict[f"ft_{i}"] = frac_acc._total[key]
-            save_dict[f"fu_{i}"] = frac_acc._unc[key]
-            save_dict[f"fr_{i}"] = frac_acc._reads[key]
-        else:
-            ns = len(frac_acc.strata)
-            save_dict[f"ft_{i}"] = np.zeros((ns, frac_acc.n_bins), dtype=np.int64)
-            save_dict[f"fu_{i}"] = np.zeros((ns, frac_acc.n_bins), dtype=np.int64)
-            save_dict[f"fr_{i}"] = np.zeros(ns, dtype=np.int64)
+        if key in damage_acc._s5:
+            save_dict[f"s5_{i}"] = damage_acc._s5[key]
+            save_dict[f"s3_{i}"] = damage_acc._s3[key]
+            save_dict[f"sn_{i}"] = damage_acc._sn[key]
     np.savez_compressed(path, **save_dict)
 
 
-def load_damage_arrays(
-    path: str | Path,
-) -> tuple[DamageAccumulator, FractionalAccumulator]:
-    """
-    Reconstruct DamageAccumulator + FractionalAccumulator from npz file.
-    """
+def load_damage_arrays(path: str | Path) -> DamageAccumulator:
+    """Reconstruct a DamageAccumulator from an npz file."""
     data = np.load(path, allow_pickle=False)
-    keys     = json.loads(bytes(data["keys"]).decode("utf-8"))
-    max_pos  = int(data["max_pos"][0])
-    n_bins   = int(data["n_bins"][0])
-    strata   = [tuple(s) for s in json.loads(bytes(data["strata"]).decode("utf-8"))]
+    keys    = json.loads(bytes(data["keys"]).decode("utf-8"))
+    max_pos = int(data["max_pos"][0])
+    strata  = [tuple(x) for x in json.loads(bytes(data["strata"]).decode("utf-8"))]
 
-    damage_acc = DamageAccumulator(max_pos=max_pos)
-    frac_acc   = FractionalAccumulator(strata=strata, n_bins=n_bins)
-
+    kmer_size = int(data["kmer_size"][0]) if "kmer_size" in data.files else 0
+    damage_acc = DamageAccumulator(max_pos=max_pos, strata=strata, kmer_size=kmer_size)
     for i, key in enumerate(keys):
         damage_acc._5[key] = data[f"d5_{i}"].copy()
         damage_acc._3[key] = data[f"d3_{i}"].copy()
         damage_acc._n[key] = int(data[f"dn_{i}"][0])
-        frac_acc._total[key] = data[f"ft_{i}"].copy()
-        frac_acc._unc[key]   = data[f"fu_{i}"].copy()
-        frac_acc._reads[key] = data[f"fr_{i}"].copy()
-
-    return damage_acc, frac_acc
+        if f"s5_{i}" in data.files:
+            damage_acc._s5[key] = data[f"s5_{i}"].copy()
+            damage_acc._s3[key] = data[f"s3_{i}"].copy()
+            damage_acc._sn[key] = data[f"sn_{i}"].copy()
+    return damage_acc
 
 
 def merge_damage_accumulators(
     damage_accs: list[DamageAccumulator],
-    frac_accs:   list[FractionalAccumulator],
-) -> tuple[DamageAccumulator, FractionalAccumulator]:
-    """
-    Sum accumulator arrays element-wise across multiple per-unit accumulators.
-    Returns a single merged DamageAccumulator + FractionalAccumulator.
-    """
+) -> DamageAccumulator:
+    """Sum accumulator arrays element-wise across per-unit accumulators."""
     if not damage_accs:
         raise ValueError("damage_accs must be non-empty")
 
-    merged_dmg  = damage_accs[0]
-    merged_frac = frac_accs[0]
-
-    for dacc, facc in zip(damage_accs[1:], frac_accs[1:]):
+    merged = damage_accs[0]
+    for dacc in damage_accs[1:]:
+        if getattr(dacc, "kmer_size", 0):
+            if not merged.kmer_size:
+                merged.kmer_size = dacc.kmer_size
+            elif merged.kmer_size != dacc.kmer_size:
+                print(f"WARNING: units disagree on k-mer size "
+                      f"({merged.kmer_size} vs {dacc.kmer_size}); keeping "
+                      f"{merged.kmer_size}", file=sys.stderr)
         for key in dacc.taxids():
-            if key not in merged_dmg._5:
-                merged_dmg._init_key(key)
-            merged_dmg._5[key] += dacc._5[key]
-            merged_dmg._3[key] += dacc._3[key]
-            merged_dmg._n[key] += dacc._n[key]
-        for key in facc._total:
-            if key not in merged_frac._total:
-                merged_frac._init(key)
-            merged_frac._total[key] += facc._total[key]
-            merged_frac._unc[key]   += facc._unc[key]
-            merged_frac._reads[key] += facc._reads[key]
-
-    return merged_dmg, merged_frac
+            if key not in merged._5:
+                merged._init_key(key)
+            merged._5[key] += dacc._5[key]
+            merged._3[key] += dacc._3[key]
+            merged._n[key] += dacc._n[key]
+            if key in dacc._s5:
+                if key not in merged._s5:
+                    merged._s5[key] = np.zeros_like(dacc._s5[key])
+                    merged._s3[key] = np.zeros_like(dacc._s3[key])
+                    merged._sn[key] = np.zeros(dacc._s5[key].shape[0], dtype=np.int64)
+                merged._s5[key] += dacc._s5[key]
+                merged._s3[key] += dacc._s3[key]
+                merged._sn[key] += dacc._sn[key]
+    return merged
 
 
 # ---------------------------------------------------------------------------

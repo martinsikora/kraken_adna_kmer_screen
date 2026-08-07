@@ -58,20 +58,39 @@ restrict_to_target_genus_features: false
 # ---------------------------------------------------------------------------
 # aDNA damage profiling
 # ---------------------------------------------------------------------------
-damage_max_pos:              25    # positions from read end to profile
+# Damage is estimated only from reads inside this length window.
+#
+# The upper bound must sit BELOW the shortest sequencing read length used for
+# the sample. A read at the read-length cap is a truncated molecule: its 3' end
+# is a sequencing cut-off, not a molecule terminus, so it carries no terminal
+# damage and dilutes the 3' estimate. Measured on a 100 bp run, the 3' terminal
+# excess collapses from ~+4.4 points (reads under 95 bp) to +0.3 at 98-99 bp --
+# contamination begins a couple of bases below the cap, not at it. Pooling lanes
+# of different read length otherwise mixes different cap positions into one
+# profile.
+#
+# The lower bound sets how far into the read the profile has a constant sample
+# size: with k-mer size k, a read reaches position j only if length >= k + j.
+# Below that the far positions are computed from progressively fewer, longer
+# reads, which biases the plateau upward.
+damage_min_read_length:      30
+damage_max_read_length:      75
+
+damage_max_pos:              10    # positions from read end to profile
 damage_min_reads:            100   # minimum reads to compute damage stats for a taxon
-damage_n_bins:               50    # bins for fractional-position profiles
 damage_adaptive_plateau:     true  # auto-detect plateau window per taxon
 damage_plateau_search_start: 3     # search window start (positions from end)
-damage_plateau_search_end:   10    # search window end
+damage_plateau_search_end:   9     # search window end (< damage_max_pos)
 damage_min_plateau_window:   3     # minimum plateau width
 damage_plateau_noise_factor: 2.0   # allowed noise multiple above plateau mean
 
-# Read-length strata for fractional damage profiles (lo-hi bp).
-# screen_unit accumulates one array per stratum; plot_damage_fractional.R
-# can sum stored strata into wider requested bins, so regrouping for
-# plotting alone does not require re-screening.
-damage_strata: ["31-55", "56-75", "76-100"]
+# Read-length strata for the damage profile (lo-hi bp). screen_unit keeps one
+# set of position arrays per stratum in addition to the pooled ones, so the
+# damage plot can show whether a profile holds up across read lengths. A read
+# reaches k-mer position j only if its length is at least k + j, so a pooled
+# profile changes its read composition along the x axis; the strata make that
+# visible. Must lie inside the damage length window.
+damage_strata: ["30-55", "56-75"]
 
 # Damage-plot hit selection: all listed hit_criteria_flag tokens must be present.
 # (evenness intentionally excluded from plotting hit selection)

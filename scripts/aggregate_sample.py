@@ -13,7 +13,7 @@ Outputs written to --out-damage-prefix:
   <prefix>.damage_profile.tsv
   <prefix>.damage_stats.tsv
   <prefix>.damage_global.tsv
-  <prefix>.damage_fractional_profile.tsv
+  <prefix>.damage_profile_stratified.tsv
 """
 
 from __future__ import annotations
@@ -109,14 +109,8 @@ def main() -> None:
         f"[aggregate_sample] merging {len(args.damage_arrays)} damage accumulator(s)",
         file=sys.stderr, flush=True,
     )
-    damage_accs = []
-    frac_accs   = []
-    for path in args.damage_arrays:
-        dacc, facc = load_damage_arrays(path)
-        damage_accs.append(dacc)
-        frac_accs.append(facc)
-
-    merged_damage, merged_frac = merge_damage_accumulators(damage_accs, frac_accs)
+    damage_accs = [load_damage_arrays(path) for path in args.damage_arrays]
+    merged_damage = merge_damage_accumulators(damage_accs)
 
     # --- 3. Compute damage stats ---
     stats_df, global_df = compute_damage_stats(
@@ -130,14 +124,14 @@ def main() -> None:
         min_plateau_window    = args.min_plateau_window,
         plateau_noise_factor  = args.plateau_noise_factor,
     )
-    profile_df      = merged_damage.to_dataframe(min_reads=args.min_reads)
-    frac_profile_df = merged_frac.to_dataframe(min_reads=args.min_reads)
+    profile_df       = merged_damage.to_dataframe(min_reads=args.min_reads)
+    stratified_df    = merged_damage.to_dataframe_stratified(min_reads=args.min_reads)
 
     prefix = args.out_damage_prefix
     write_tsv(f"{prefix}.damage_profile.tsv",            profile_df)
+    write_tsv(f"{prefix}.damage_profile_stratified.tsv", stratified_df)
     write_tsv(f"{prefix}.damage_stats.tsv",              stats_df)
     write_tsv(f"{prefix}.damage_global.tsv",             global_df)
-    write_tsv(f"{prefix}.damage_fractional_profile.tsv", frac_profile_df)
 
     elapsed = time.perf_counter() - start
     print(

@@ -199,7 +199,9 @@ p <- ggplot(df, aes(x = .data$x, y = .data$y)) +
     y = "Damage rate (%)",
     title = "aDNA damage summary"
   ) +
-  theme_screen()
+  theme_screen() +
+  theme(panel.border = element_rect(colour = "grey30", fill = NA, linewidth = 0.4),
+        axis.line = element_blank())
 
 if (!is.null(args$max_x)) p <- p + coord_cartesian(xlim = c(NA, args$max_x))
 

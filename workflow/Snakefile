@@ -114,7 +114,6 @@ rule all:
             [
                 "results/samples/{sample_id}/{sample_id}.damage_profile.pdf",
                 "results/samples/{sample_id}/{sample_id}.damage_summary.pdf",
-                "results/samples/{sample_id}/{sample_id}.damage_fractional.pdf",
             ],
             sample_id=SAMPLES,
         ),
@@ -138,8 +137,9 @@ rule screen_unit:
     params:
         exclude_taxids = [str(t) for t in config["exclude_taxids"]],
         max_pos        = config["damage_max_pos"],
-        n_bins         = config["damage_n_bins"],
         strata         = damage_strata_args(),
+        min_read_len   = config.get("damage_min_read_length", 30),
+        max_read_len   = config.get("damage_max_read_length", 75),
     resources:
         mem_mb   = config["resources"]["screen_unit"]["mem_mb"],
         runtime  = config["resources"]["screen_unit"]["runtime"],
@@ -156,8 +156,9 @@ rule screen_unit:
             --out-summary        {output.summary:q} \
             --exclude-taxids     {params.exclude_taxids:q} \
             --max-pos            {params.max_pos} \
-            --n-bins             {params.n_bins} \
             --strata             {params.strata:q} \
+            --min-read-length    {params.min_read_len} \
+            --max-read-length    {params.max_read_len} \
             > {log:q} 2>&1
         """
 
@@ -176,7 +177,7 @@ rule aggregate_sample:
         damage_profile    = "results/samples/{sample_id}/{sample_id}.damage_profile.tsv",
         damage_stats      = "results/samples/{sample_id}/{sample_id}.damage_stats.tsv",
         damage_global     = "results/samples/{sample_id}/{sample_id}.damage_global.tsv",
-        damage_frac       = "results/samples/{sample_id}/{sample_id}.damage_fractional_profile.tsv",
+        damage_strat      = "results/samples/{sample_id}/{sample_id}.damage_profile_stratified.tsv",
     params:
         out_damage_prefix      = "results/samples/{sample_id}/{sample_id}",
         min_reads              = config["damage_min_reads"],
@@ -349,13 +350,12 @@ rule plot_damage:
         profile  = "results/samples/{sample_id}/{sample_id}.damage_profile.tsv",
         stats    = "results/samples/{sample_id}/{sample_id}.damage_stats.tsv",
         global_  = "results/samples/{sample_id}/{sample_id}.damage_global.tsv",
-        frac     = "results/samples/{sample_id}/{sample_id}.damage_fractional_profile.tsv",
+        strat    = "results/samples/{sample_id}/{sample_id}.damage_profile_stratified.tsv",
         hits     = "results/summary/all_samples.summary.tsv.gz",
         coverage = "results/samples/{sample_id}/{sample_id}.coverage.tsv",
     output:
         profile_pdf  = "results/samples/{sample_id}/{sample_id}.damage_profile.pdf",
         summary_pdf  = "results/samples/{sample_id}/{sample_id}.damage_summary.pdf",
-        frac_pdf     = "results/samples/{sample_id}/{sample_id}.damage_fractional.pdf",
     params:
         sample_id                = "{sample_id}",
         max_pos                  = config["damage_max_pos"],
@@ -374,6 +374,7 @@ rule plot_damage:
             --profile   {input.profile:q} \
             --global    {input.global_:q} \
             --stats     {input.stats:q} \
+            --profile-stratified {input.strat:q} \
             --label     {params.sample_id:q} \
             --hits      {input.hits:q} \
             --sample-id {params.sample_id:q} \
@@ -394,15 +395,4 @@ rule plot_damage:
             --output                   {output.summary_pdf:q} \
             2>> {log:q}
 
-        Rscript "{SCRIPTS_DIR}/plot_damage_fractional.R" \
-            --fractional {input.frac:q} \
-            --global     {input.global_:q} \
-            --label      {params.sample_id:q} \
-            --hits       {input.hits:q} \
-            --sample-id  {params.sample_id:q} \
-            --hits-required-flags {params.required_hit_flags:q} \
-            --max-keys  {params.max_keys} \
-            --strata     {params.strata:q} \
-            --output     {output.frac_pdf:q} \
-            2>> {log:q}
-        """
+"""
