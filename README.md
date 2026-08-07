@@ -28,13 +28,23 @@ For each sample (merge lanes):
 For each sample:
   merged vector + reference matrix ──► fit_abundance ──► abundance.tsv
 
-All samples:
-  abundance + damage + coverage ──► aggregate_all ──► integrated summary table (.tsv.gz)
+Per sample:
+  abundance + damage + coverage ──► summarize_sample ──► summary.tsv.gz (hit flags)
 
 Per sample (auto):
-  damage TSVs + integrated summary flags ──► plot_damage ──► damage_profile.pdf
+  damage TSVs + that sample's hit flags ──► plot_damage ──► damage_profile.pdf
                                             ──► damage_summary.pdf
+
+All samples:
+  abundance + damage + coverage ──► aggregate_all ──► integrated summary table (.tsv.gz)
 ```
+
+Every column of the summary, `hit_criteria_flag` included, is a per-row function
+of a single sample's own evidence — the merges are on `(sample_id,
+species_name)`, the criteria compare a row against fixed config thresholds, and
+the sort is within sample. So a sample's summary and its damage plots are built
+as soon as that sample finishes, without waiting for the rest of the dataset.
+`aggregate_all` remains a genuine cross-sample step and still needs them all.
 
 ---
 
@@ -386,6 +396,7 @@ The integrated summary table and per-sample damage PDFs are built by the default
 | `{sample_id}.damage_profile_stratified.tsv` | Per-species absolute-position profiles split by read-length stratum |
 | `{sample_id}.damage_model.tsv` | Per-species per-base damage rates from k-mer window deconvolution |
 | `{sample_id}.coverage.tsv` | Per-taxon coverage and evenness statistics |
+| `{sample_id}.summary.tsv.gz` | This sample's slice of the integrated summary, hit flags included |
 | `{sample_id}.damage_profile.pdf` | Absolute-position damage plots (hit species) |
 | `{sample_id}.damage_summary.pdf` | Damage biplot across all profiled taxa |
 

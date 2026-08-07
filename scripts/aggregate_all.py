@@ -68,6 +68,15 @@ def parse_args() -> argparse.Namespace:
                         help="Per-sample .coverage.tsv files")
     parser.add_argument("--out-dir",     required=True,
                         help="Output directory for summary TSVs")
+    parser.add_argument("--out-file",    default=None,
+                        help="Write the summary to this exact path instead of "
+                             "<out-dir>/all_samples.summary.tsv.gz. Every column "
+                             "of the summary, hit_criteria_flag included, is a "
+                             "per-row function of one sample's own evidence, so "
+                             "running this script on a single sample yields "
+                             "exactly that sample's slice of the full table; "
+                             "this option is what lets the workflow build a "
+                             "per-sample summary without waiting for the rest.")
     parser.add_argument("--hit-max-damage-pvalue",   type=float, default=0.05,
                         help="Maximum damage_pvalue for hit table")
     parser.add_argument("--hit-min-evenness",        type=float, default=0.5,
@@ -687,8 +696,9 @@ def main() -> None:
         hit_max_dup_shallow=args.hit_max_dup_shallow,
         hit_min_cov_deep=args.hit_min_cov_deep,
     )
-    out_path = out_dir / "all_samples.summary.tsv.gz"
-    tmp_out_path = out_dir / "all_samples.summary.tsv.gz.tmp"
+    out_path = Path(args.out_file) if args.out_file else out_dir / "all_samples.summary.tsv.gz"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_out_path = out_path.with_suffix(out_path.suffix + ".tmp")
     summary_df.to_csv(tmp_out_path, sep="\t", index=False, compression="gzip")
     tmp_out_path.replace(out_path)
 

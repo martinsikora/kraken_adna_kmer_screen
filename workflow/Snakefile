@@ -299,6 +299,65 @@ rule coverage_evenness:
 
 
 # ---------------------------------------------------------------------------
+# Rule: summarize_sample
+# One sample's slice of the integrated summary, hit flags included.
+#
+# Every column of that summary is a per-row function of a single sample's own
+# evidence: the merges are on (sample_id, species_name), the four hit criteria
+# compare that row against fixed config thresholds, and the sort is within
+# sample. Nothing is pooled, ranked or normalised across samples. Running
+# aggregate_all.py on one sample therefore reproduces that sample's rows of the
+# full table exactly -- verified byte-identical, hit_criteria_flag included.
+#
+# Splitting it out means damage plots for a finished sample no longer wait on
+# every other sample being screened.
+# ---------------------------------------------------------------------------
+
+rule summarize_sample:
+    input:
+        abundance     = "results/samples/{sample_id}/{sample_id}.abundance.tsv",
+        damage        = "results/samples/{sample_id}/{sample_id}.damage_global.tsv",
+        damage_stats  = "results/samples/{sample_id}/{sample_id}.damage_stats.tsv",
+        coverage      = "results/samples/{sample_id}/{sample_id}.coverage.tsv",
+    output:
+        summary = "results/samples/{sample_id}/{sample_id}.summary.tsv.gz",
+    params:
+        out_dir                    = "results/samples/{sample_id}",
+        hit_max_damage_pvalue      = config["hit_max_damage_pvalue"],
+        hit_min_evenness           = config["hit_min_evenness"],
+        hit_min_within_genus_ra    = config["hit_min_within_genus_ra"],
+        hit_min_classified_rate    = config.get("hit_min_classified_rate", 0.5),
+        hit_evenness_mode          = config.get("hit_evenness_mode", "depth-aware"),
+        hit_evenness_lambda_split  = config.get("hit_evenness_lambda_split", 0.1),
+        hit_max_dup_shallow        = config.get("hit_max_dup_shallow", 6.0),
+        hit_min_cov_deep           = config.get("hit_min_cov_deep", 0.02),
+    resources:
+        mem_mb   = config["resources"]["aggregate_all"]["mem_mb"],
+        runtime  = config["resources"]["aggregate_all"]["runtime"],
+    log:
+        "logs/samples/{sample_id}.summarize_sample.log"
+    shell:
+        """
+        PYTHONPATH="{SCRIPTS_DIR}" python "{SCRIPTS_DIR}/aggregate_all.py" \
+            --abundance      {input.abundance:q} \
+            --damage         {input.damage:q} \
+            --damage-stats   {input.damage_stats:q} \
+            --coverage       {input.coverage:q} \
+            --out-dir        {params.out_dir:q} \
+            --out-file       {output.summary:q} \
+            --hit-max-damage-pvalue   {params.hit_max_damage_pvalue} \
+            --hit-min-evenness        {params.hit_min_evenness} \
+            --hit-min-within-genus-ra {params.hit_min_within_genus_ra} \
+            --hit-min-classified-rate {params.hit_min_classified_rate} \
+            --hit-evenness-mode          {params.hit_evenness_mode:q} \
+            --hit-evenness-lambda-split  {params.hit_evenness_lambda_split} \
+            --hit-max-dup-shallow        {params.hit_max_dup_shallow} \
+            --hit-min-cov-deep           {params.hit_min_cov_deep} \
+            > {log:q} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
 # Rule: aggregate_all
 # Concatenate per-sample results into one integrated workflow-level summary table.
 # ---------------------------------------------------------------------------
@@ -356,7 +415,10 @@ rule plot_damage:
         stats    = "results/samples/{sample_id}/{sample_id}.damage_stats.tsv",
         global_  = "results/samples/{sample_id}/{sample_id}.damage_global.tsv",
         strat    = "results/samples/{sample_id}/{sample_id}.damage_profile_stratified.tsv",
-        hits     = "results/summary/all_samples.summary.tsv.gz",
+        # This sample's own slice of the integrated summary, not the
+        # cross-sample table: the hit flags are per-row, so waiting for every
+        # other sample to finish bought nothing. See rule summarize_sample.
+        hits     = "results/samples/{sample_id}/{sample_id}.summary.tsv.gz",
         coverage = "results/samples/{sample_id}/{sample_id}.coverage.tsv",
     output:
         profile_pdf  = "results/samples/{sample_id}/{sample_id}.damage_profile.pdf",
