@@ -162,6 +162,74 @@ def parse_kmer_string_with_counts(
     return np.repeat(np.array(tids, dtype=np.int64), counts), taxid_counts
 
 
+def parse_kmer_string_runs(
+    s: str,
+    exclude_set: set[int],
+) -> tuple[list, list, Dict[int, float], int, int]:
+    """
+    Run-length variant of parse_kmer_string_with_counts: returns the (taxid,
+    count) runs as-is instead of expanding them to one entry per k-mer.
+
+    The expanded array is only ever consumed as (a) the first and last max_pos
+    entries, (b) a binned histogram, and (c) two scalar sums — all of which are
+    derivable from the runs directly. Skipping the expansion removes the largest
+    single allocation in the per-read path.
+
+    Returns (tids, counts, taxid_counts, n_kmers, n_unclassified).
+    """
+    tids: List[int] = []
+    counts: List[int] = []
+    taxid_counts: Dict[int, float] = {}
+    nk = 0
+    unc = 0
+
+    for token in s.strip().split():
+        if ":" not in token:
+            continue
+        tid_str, cnt_str = token.rsplit(":", 1)
+        try:
+            taxid = 0 if tid_str == "A" else int(tid_str)
+            count = int(cnt_str)
+        except ValueError:
+            continue
+        tids.append(taxid)
+        counts.append(count)
+        nk += count
+        if taxid == 0:
+            unc += count
+        if count > 0 and taxid not in exclude_set:
+            taxid_counts[taxid] = taxid_counts.get(taxid, 0.0) + count
+
+    return tids, counts, taxid_counts, nk, unc
+
+
+def end_flags_from_runs(tids, counts, n5: int) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Unclassified flags for the first n5 and last n5 k-mer positions, with the
+    3' array reversed — matching kmers[:n5] and kmers[nk-n5:][::-1].
+    """
+    head = np.zeros(n5, dtype=np.int64)
+    pos = 0
+    for t, c in zip(tids, counts):
+        if pos >= n5:
+            break
+        if t == 0:
+            head[pos:min(pos + c, n5)] = 1
+        pos += c
+
+    tail = np.zeros(n5, dtype=np.int64)
+    pos = 0
+    for i in range(len(tids) - 1, -1, -1):
+        if pos >= n5:
+            break
+        c = counts[i]
+        if tids[i] == 0:
+            tail[pos:min(pos + c, n5)] = 1
+        pos += c
+
+    return head, tail
+
+
 # ---------------------------------------------------------------------------
 # Taxonomy loaders — new column schema
 # (tax_rank, tax_id, tax_name, tax_ids_descendant)
@@ -363,6 +431,7 @@ class FractionalAccumulator:
         self._total: dict = {}
         self._unc:   dict = {}
         self._reads: dict = {}
+        self._F_cache: dict = {}
 
     def _init(self, key):
         ns = len(self.strata)
@@ -390,6 +459,57 @@ class FractionalAccumulator:
         bis   = np.minimum((fracs * self.n_bins).astype(int), self.n_bins - 1)
         np.add.at(self._total[key][s], bis, 1)
         np.add.at(self._unc[key][s],   bis, (kmers == 0).astype(np.int64))
+
+    def _F(self, nk: int) -> np.ndarray:
+        """
+        Cumulative fractional-bin table for reads of nk k-mers.
+
+        F[x] is the bin histogram of positions [0, x), so a contiguous run
+        [a, b) contributes exactly F[b] - F[a]. Depends only on nk, and aDNA
+        reads span few distinct nk, so this is computed once per length and
+        reused. Shape (nk+1, n_bins).
+        """
+        F = self._F_cache.get(nk)
+        if F is None:
+            fracs = np.arange(nk) / (nk - 1)
+            bis   = np.minimum((fracs * self.n_bins).astype(int), self.n_bins - 1)
+            F = np.zeros((nk + 1, self.n_bins), dtype=np.int64)
+            for i, b in enumerate(bis):
+                F[i + 1] = F[i]
+                F[i + 1, b] += 1
+            F.flags.writeable = False
+            self._F_cache[nk] = F
+        return F
+
+    def add_runs(self, key, read_len: int, tids, counts, nk: int, has_unc: bool):
+        """
+        Run-length equivalent of add_read. Produces bit-identical state without
+        visiting individual k-mer positions: totals come from F[nk], and each
+        unclassified run [a, b) adds F[b] - F[a].
+        """
+        s = self._stratum_idx(read_len)
+        if s < 0:
+            return
+        if nk < 2:
+            return
+        if key not in self._total:
+            self._init(key)
+        self._reads[key][s] += 1
+
+        F = self._F(nk)
+        self._total[key][s] += F[nk]
+
+        if not has_unc:
+            return
+        acc = None
+        pos = 0
+        for t, c in zip(tids, counts):
+            if t == 0 and c > 0:
+                seg = F[pos + c] - F[pos]
+                acc = seg if acc is None else acc + seg
+            pos += c
+        if acc is not None:
+            self._unc[key][s] += acc
 
     def to_dataframe(self, min_reads: int = 1) -> pd.DataFrame:
         """
@@ -470,6 +590,22 @@ class DamageAccumulator:
         tail = kmers[nk - n5:][::-1]
         self._3[key][:n5, 0] += 1
         self._3[key][:n5, 1] += (tail == 0).astype(np.int64)
+
+    def add_flags(self, key, n5: int, head: np.ndarray, tail: np.ndarray):
+        """
+        Run-length equivalent of add_read: takes precomputed unclassified flags
+        for the first and last n5 positions (3' already reversed) instead of the
+        expanded k-mer array. State and arithmetic are identical to add_read.
+        """
+        if n5 == 0:
+            return
+        if key not in self._5:
+            self._init_key(key)
+        self._n[key] += 1
+        self._5[key][:n5, 0] += 1
+        self._5[key][:n5, 1] += head
+        self._3[key][:n5, 0] += 1
+        self._3[key][:n5, 1] += tail
 
     def taxids(self):
         return list(self._5.keys())

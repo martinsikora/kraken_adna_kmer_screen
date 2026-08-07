@@ -26,8 +26,9 @@ import pandas as pd
 
 from kraken_screen_lib import (
     build_feature_lookup,
+    end_flags_from_runs,
     load_species_membership_v2,
-    parse_kmer_string_with_counts,
+    parse_kmer_string_runs,
     parse_strata_spec,
     save_sparse_vector,
     save_damage_arrays,
@@ -113,13 +114,14 @@ def main() -> None:
 
             status, read_id, taxid_str, length_str, kmer_str = parts
 
-            # Parse kmer string once for both purposes
-            kmers, taxid_counts = parse_kmer_string_with_counts(kmer_str, exclude_set)
+            # Parse kmer string once for both purposes, keeping run-length form
+            tids, counts, taxid_counts, nk, unc = parse_kmer_string_runs(
+                kmer_str, exclude_set
+            )
 
             # Track all parsed k-mer mass (including excluded taxa and "A" tokens)
-            total_mass += float(kmers.size)
-            if kmers.size:
-                unclassified_mass += float(np.count_nonzero(kmers == 0))
+            total_mass += float(nk)
+            unclassified_mass += float(unc)
 
             # --- NNLS vector path ---
             for feat_taxid, count in taxid_counts.items():
@@ -140,9 +142,12 @@ def main() -> None:
                 species_info = child_to_species.get(taxid)
                 if species_info is not None:
                     _, species_name = species_info
-                    if len(kmers) > 0:
-                        damage_acc.add_read(species_name, kmers)
-                        frac_acc.add_read(species_name, read_len, kmers)
+                    if nk > 0:
+                        n5 = min(nk, args.max_pos)
+                        head, tail = end_flags_from_runs(tids, counts, n5)
+                        damage_acc.add_flags(species_name, n5, head, tail)
+                        frac_acc.add_runs(species_name, read_len, tids, counts,
+                                          nk, unc > 0)
                         n_species_accumulated.add(species_name)
 
             if args.progress_every > 0 and n_rows % args.progress_every == 0:
