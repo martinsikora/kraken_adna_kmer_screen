@@ -473,18 +473,50 @@ and plotting still use `damage_score`.
 | `damage_rate_5prime` / `_3prime` | Terminal damage amplitude above the floor |
 | `decay_5prime` / `_3prime` | Exponential decay length, bp |
 | `terminal_rate_5prime` / `_3prime` | `interior_rate + damage_rate`, the rate at the terminal base |
-| `damage_model_pvalue_5prime` / `_3prime` | One-sided test that the amplitude exceeds zero |
-| `chi2_df` | Fit diagnostic — see caveat below |
+| `damage_model_pvalue_5prime` / `_3prime` | One-sided test that the amplitude exceeds zero — **not usable for detection, see below** |
+| `chi2_df` | Fit quality; values in the hundreds mean the exponential shape is a poor fit at that depth |
 | `converged`, `n_obs`, `n_strata_used` | Fit provenance |
 
-**Caveat on `chi2_df`.** k-mers within a read overlap, so the binomial
-likelihood understates variance; standard errors are scaled by `sqrt(chi2/df)`
-as a quasi-likelihood correction. For taxa with very many reads the exponential
-shape is a visible approximation and `chi2/df` reaches the hundreds, which
-inflates the standard errors and makes `damage_model_pvalue_*` conservative.
-Treat the rate estimates as the primary output and `chi2_df` as a fit-quality
-flag; on synthetic controls the estimates stay stable (≈10% spread) across
-stratum and `damage_max_pos` choices that move `damage_score` by ~280%.
+**Do not use `damage_model_pvalue_*` for detection.** k-mers within a read
+overlap, so the binomial likelihood understates variance; standard errors are
+scaled by `sqrt(chi2/df)` as a quasi-likelihood correction. That correction also
+absorbs shape misspecification, and for taxa with many reads the single
+exponential is a visible approximation, so `chi2/df` reaches the hundreds and
+the standard errors inflate with it. The result is a test that gets *less*
+sensitive as evidence accumulates. Measured on DA195 (species rank, fraction
+reaching p < 0.05, against a 5% null expectation):
+
+| reads | `damage_pvalue` (plateau) | `damage_model_pvalue_5prime` |
+|---|---|---|
+| 100–200 | 6.4% | 4.7% |
+| 200–400 | 6.3% | 0.7% |
+| 400–1000 | 5.8% | 0.8% |
+| 1000–5000 | 14.8% | 4.1% |
+| 5000+ | 60.7% | **0.0%** |
+
+The plateau test separates from the null above ~1000 reads; the model test never
+does, and collapses to zero exactly where the signal is strongest. Use
+`damage_pvalue` for significance and hit criteria, which is what the workflow
+does.
+
+**The rate estimates are the deliverable.** `damage_rate_5prime` / `_3prime` and
+`interior_rate` are stable where `damage_score` is not: on synthetic controls
+they move ≈10% across stratum and `damage_max_pos` choices that move
+`damage_score` by ~280%, and on the undamaged control the amplitudes go to zero.
+Read `chi2_df` as a fit-quality flag, and note that `decay_5prime` / `_3prime`
+frequently rail at their bounds on real data — the decay length is not well
+identified by a single exponential, so treat the amplitudes, not the decays, as
+the interpretable parameters.
+
+**Detection limits at low depth.** `damage_score` is a difference of two
+binomial proportions, so the smallest detectable value scales as 1/sqrt(reads):
+roughly 6.8 percentage points at 100 reads, 4.8 at 200, 3.0 at 500, 2.1 at 1000
+(for a ~15% plateau). Below ~1000 reads the damage test is at its null rate, and
+taxa under `damage_min_reads` never enter the summary at all, since a
+`damage_pvalue` is required. Low-read candidates therefore have to be triaged on
+`kmers`, `cov` and abundance rather than damage significance — but note that at
+~100 reads `kmers` is only 2–4x the read count, so it measures how much evidence
+there is, not how evenly it is spread.
 
 ---
 
