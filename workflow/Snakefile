@@ -311,6 +311,10 @@ rule aggregate_all:
         hit_min_evenness        = config["hit_min_evenness"],
         hit_min_within_genus_ra = config["hit_min_within_genus_ra"],
         hit_min_classified_rate = config.get("hit_min_classified_rate", 0.5),
+        hit_evenness_mode          = config.get("hit_evenness_mode", "depth-aware"),
+        hit_evenness_lambda_split  = config.get("hit_evenness_lambda_split", 0.1),
+        hit_max_dup_shallow        = config.get("hit_max_dup_shallow", 3.0),
+        hit_min_cov_deep           = config.get("hit_min_cov_deep", 0.05),
     resources:
         mem_mb   = config["resources"]["aggregate_all"]["mem_mb"],
         runtime  = config["resources"]["aggregate_all"]["runtime"],
@@ -328,6 +332,10 @@ rule aggregate_all:
             --hit-min-evenness        {params.hit_min_evenness} \
             --hit-min-within-genus-ra {params.hit_min_within_genus_ra} \
             --hit-min-classified-rate {params.hit_min_classified_rate} \
+            --hit-evenness-mode          {params.hit_evenness_mode:q} \
+            --hit-evenness-lambda-split  {params.hit_evenness_lambda_split} \
+            --hit-max-dup-shallow        {params.hit_max_dup_shallow} \
+            --hit-min-cov-deep           {params.hit_min_cov_deep} \
             > {log:q} 2>&1
         """
 

@@ -90,9 +90,26 @@ evenness_ranks: [species, genus]   # taxonomic ranks to report
 # Summary / hit table thresholds
 # ---------------------------------------------------------------------------
 hit_max_damage_pvalue:   0.05   # damage_pvalue < threshold
-hit_min_evenness:        0.5    # evenness_index > threshold
 hit_min_within_genus_ra: 0.1    # within_genus_relative_abundance >= threshold
 hit_min_classified_rate: 0.5    # plateau_classified_rate >= threshold
+
+# Coverage-evenness criterion.
+#
+# evenness_index is E = cov / (1 - exp(-dup*cov)). It collapses to 1/dup when
+# mean genome depth (lambda = dup*cov) is far below 1, and to cov when lambda is
+# far above 1, so one threshold on E tests two unrelated things depending on a
+# taxon's depth. depth-aware applies the appropriate test per regime:
+#
+#   lambda <  hit_evenness_lambda_split : dup < hit_max_dup_shallow
+#   lambda >= hit_evenness_lambda_split : cov > hit_min_cov_deep
+#
+# Set hit_evenness_mode: legacy to restore the previous single-threshold
+# behaviour (evenness_index > hit_min_evenness).
+hit_evenness_mode:         depth-aware   # depth-aware | legacy
+hit_evenness_lambda_split: 0.1           # dup*cov boundary between regimes
+hit_max_dup_shallow:       3.0           # shallow regime: max k-mer duplication
+hit_min_cov_deep:          0.05          # deep regime: min breadth of coverage
+hit_min_evenness:          0.5           # legacy mode, and fallback when dup/cov absent
 
 # ---------------------------------------------------------------------------
 # Compute resources (mem_mb: MB RAM; runtime: minutes)

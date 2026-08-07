@@ -263,9 +263,27 @@ as semicolon-delimited tokens in `hit_criteria_flag`:
 | Parameter | Default | Criterion |
 |---|---|---|
 | `hit_max_damage_pvalue` | `0.05` | `damage_pvalue` < threshold |
-| `hit_min_evenness` | `0.5` | `evenness_index` > threshold |
 | `hit_min_within_genus_ra` | `0.1` | `within_genus_relative_abundance` ≥ threshold |
 | `hit_min_classified_rate` | `0.5` | `plateau_classified_rate` ≥ threshold |
+
+The `evenness_index` criterion is depth-aware. `evenness_index` is the
+Lander-Waterman ratio `E = cov / (1 − exp(−dup·cov))`, which degenerates at both
+ends of the depth range: when mean genome depth `λ = dup·cov` is far below 1,
+`E ≈ 1/dup`; when it is far above 1, `E ≈ cov`. Screening data sits almost
+entirely in the first regime, so a single threshold on `E` tests k-mer
+duplication for shallow taxa but coverage breadth for deep ones. The criterion
+therefore applies the test appropriate to each regime:
+
+| Parameter | Default | Criterion |
+|---|---|---|
+| `hit_evenness_mode` | `depth-aware` | `depth-aware` or `legacy` |
+| `hit_evenness_lambda_split` | `0.1` | `λ = dup·cov` boundary between regimes |
+| `hit_max_dup_shallow` | `3.0` | shallow (`λ` < split): `dup` < threshold |
+| `hit_min_cov_deep` | `0.05` | deep (`λ` ≥ split): `cov` > threshold |
+| `hit_min_evenness` | `0.5` | `legacy` mode, and fallback when `dup`/`cov` are absent |
+
+Set `hit_evenness_mode: legacy` to restore the previous single-threshold
+behaviour (`evenness_index` > `hit_min_evenness`).
 
 When all four criteria pass, `hit_criteria_flag` is:
 `damage_pvalue;evenness_index;within_genus_relative_abundance;classified_rate`.

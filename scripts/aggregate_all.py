@@ -71,11 +71,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hit-max-damage-pvalue",   type=float, default=0.05,
                         help="Maximum damage_pvalue for hit table")
     parser.add_argument("--hit-min-evenness",        type=float, default=0.5,
-                        help="Minimum evenness_index for hit table")
+                        help="Minimum evenness_index for hit table (legacy mode, "
+                             "and fallback when dup/cov are unavailable)")
     parser.add_argument("--hit-min-within-genus-ra", type=float, default=0.1,
                         help="Minimum within_genus_relative_abundance for hit table")
     parser.add_argument("--hit-min-classified-rate", type=float, default=0.5,
                         help="Minimum plateau_classified_rate for hit table")
+    parser.add_argument("--hit-evenness-mode", choices=["depth-aware", "legacy"],
+                        default="depth-aware",
+                        help="How to evaluate the evenness_index hit criterion. "
+                             "depth-aware applies a duplication test to shallow taxa "
+                             "and a breadth test to deep ones; legacy thresholds the "
+                             "raw evenness_index (pre-existing behaviour)")
+    parser.add_argument("--hit-evenness-lambda-split", type=float, default=0.1,
+                        help="Mean genome depth (dup*cov) separating the shallow and "
+                             "deep regimes in depth-aware mode")
+    parser.add_argument("--hit-max-dup-shallow",     type=float, default=3.0,
+                        help="Shallow regime: maximum dup (k-mer duplication)")
+    parser.add_argument("--hit-min-cov-deep",        type=float, default=0.05,
+                        help="Deep regime: minimum cov (breadth of k-mer coverage)")
     return parser.parse_args()
 
 
@@ -200,6 +214,55 @@ def _taxid_as_string(df: pd.DataFrame, col: str) -> None:
     df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64").astype("string")
 
 
+def _pass_evenness_criterion(
+    merged: pd.DataFrame,
+    mode: str,
+    hit_min_evenness: float,
+    lambda_split: float,
+    max_dup_shallow: float,
+    min_cov_deep: float,
+) -> pd.Series:
+    """
+    Evaluate the evenness_index hit criterion.
+
+    evenness_index is the Lander-Waterman ratio E = cov / (1 - exp(-dup*cov)),
+    which degenerates at both ends of the depth range:
+
+        dup*cov << 1  ->  1 - exp(-lambda) ~= lambda,  so E ~= 1/dup
+        dup*cov >> 1  ->  1 - exp(-lambda) ~= 1,       so E ~= cov
+
+    Real aDNA screening data sits almost entirely in the first regime (in the
+    reference dataset, 82% of rows have lambda < 0.01, where E matches 1/dup to
+    within 0.1%). A single threshold on E therefore means "dup < 1/threshold"
+    for shallow taxa but "at least this fraction of the genome covered" for deep
+    ones -- two unrelated tests. In practice that rejected a 354k-read, p=0
+    Yersinia pestis hit with 35% breadth while accepting a 372-read one.
+
+    depth-aware mode applies the test appropriate to each regime instead:
+        shallow (lambda <  lambda_split): dup < max_dup_shallow
+        deep    (lambda >= lambda_split): cov > min_cov_deep
+
+    legacy mode thresholds E directly, reproducing the previous behaviour.
+    Rows without usable dup/cov fall back to the legacy test in either mode.
+    """
+    evenness = _series_numeric(merged, "evenness_index")
+    legacy = (evenness > hit_min_evenness).fillna(False)
+    if mode == "legacy":
+        return legacy
+
+    dup = _series_numeric(merged, "dup")
+    cov = _series_numeric(merged, "cov")
+    lam = dup * cov
+    usable = dup.notna() & cov.notna() & lam.notna()
+
+    depth_aware = pd.Series(
+        np.where(lam < lambda_split, dup < max_dup_shallow, cov > min_cov_deep),
+        index=merged.index,
+    ).fillna(False)
+
+    return depth_aware.where(usable, legacy).astype(bool)
+
+
 def build_integrated_summary(
     abundance_df: pd.DataFrame,
     damage_df: pd.DataFrame,
@@ -209,6 +272,10 @@ def build_integrated_summary(
     hit_min_evenness: float,
     hit_min_within_genus_ra: float,
     hit_min_classified_rate: float,
+    hit_evenness_mode: str = "depth-aware",
+    hit_evenness_lambda_split: float = 0.1,
+    hit_max_dup_shallow: float = 3.0,
+    hit_min_cov_deep: float = 0.05,
 ) -> pd.DataFrame:
     """
     Build one integrated sample-species table by outer-joining abundance, damage,
@@ -270,7 +337,14 @@ def build_integrated_summary(
     merged = merged[has_abundance & has_evenness & has_damage & has_classified_rate].copy()
 
     pass_damage = (_series_numeric(merged, "damage_pvalue") < hit_max_damage_pvalue).fillna(False)
-    pass_evenness = (_series_numeric(merged, "evenness_index") > hit_min_evenness).fillna(False)
+    pass_evenness = _pass_evenness_criterion(
+        merged,
+        mode=hit_evenness_mode,
+        hit_min_evenness=hit_min_evenness,
+        lambda_split=hit_evenness_lambda_split,
+        max_dup_shallow=hit_max_dup_shallow,
+        min_cov_deep=hit_min_cov_deep,
+    )
     pass_within_genus = (
         _series_numeric(merged, "within_genus_relative_abundance") >= hit_min_within_genus_ra
     ).fillna(False)
@@ -608,6 +682,10 @@ def main() -> None:
         hit_min_evenness=args.hit_min_evenness,
         hit_min_within_genus_ra=args.hit_min_within_genus_ra,
         hit_min_classified_rate=args.hit_min_classified_rate,
+        hit_evenness_mode=args.hit_evenness_mode,
+        hit_evenness_lambda_split=args.hit_evenness_lambda_split,
+        hit_max_dup_shallow=args.hit_max_dup_shallow,
+        hit_min_cov_deep=args.hit_min_cov_deep,
     )
     out_path = out_dir / "all_samples.summary.tsv.gz"
     tmp_out_path = out_dir / "all_samples.summary.tsv.gz.tmp"
