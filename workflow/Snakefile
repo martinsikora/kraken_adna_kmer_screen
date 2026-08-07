@@ -23,7 +23,10 @@ import pandas as pd
 # Load sample / unit manifest
 # ---------------------------------------------------------------------------
 
-units = pd.read_csv(config["units_tsv"], sep="\t")
+# dtype=str throughout: every manifest column is an identifier or a path, and
+# an all-digit sample_id / unit_id such as 018345 would otherwise be typed as
+# int64 and lose its leading zero, renaming the sample's output directory.
+units = pd.read_csv(config["units_tsv"], sep="\t", dtype=str)
 units.columns = units.columns.str.strip()
 
 if units["unit_id"].duplicated().any():

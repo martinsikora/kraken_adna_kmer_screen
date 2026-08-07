@@ -92,18 +92,24 @@ def _read_tsv_subset(
     """
     Read only a requested subset of columns when possible.
     Falls back to full read+subset for edge-case parser behaviors.
+
+    sample_id is forced to str: an all-digit id such as 018345 would otherwise
+    be typed as int64 and lose its leading zero, so the sample_id carried in
+    coverage.tsv would no longer match the one inferred from the file path and
+    every row of that sample would drop out of the merge.
     """
     wanted = set(wanted_cols)
     try:
         return pd.read_csv(
             path,
             sep="\t",
+            dtype={"sample_id": str},
             usecols=lambda c: c in wanted,
             nrows=nrows,
         )
     except ValueError:
         # Compatibility fallback for odd files/parsers where callable usecols fails.
-        df = pd.read_csv(path, sep="\t", nrows=nrows)
+        df = pd.read_csv(path, sep="\t", dtype={"sample_id": str}, nrows=nrows)
         present = [c for c in wanted_cols if c in df.columns]
         return df[present].copy() if present else pd.DataFrame()
 
