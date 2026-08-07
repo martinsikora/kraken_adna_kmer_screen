@@ -92,6 +92,24 @@ damage_plateau_noise_factor: 2.0   # allowed noise multiple above plateau mean
 # visible. Must lie inside the damage length window.
 damage_strata: ["30-55", "56-75"]
 
+# ---------------------------------------------------------------------------
+# Model-based damage estimation (emitted alongside damage_score, never instead)
+# ---------------------------------------------------------------------------
+# Fits per-base damage rates by deconvolving the k-mer window across the
+# read-length strata, writing <sample>.damage_model.tsv. Unlike damage_score
+# this needs no plateau (the interior rate is a fitted parameter) and no
+# read-length weighting (the parameters describe the molecules, not which
+# lengths were sequenced), and its output is directly comparable to mapDamage.
+#
+# The fit reconstructs the read-length composition inside each stratum from the
+# per-position counts, but reads with n_kmers >= damage_max_pos are censored
+# into the last position and have to be represented by a single length. Keeping
+# damage_max_pos at or above (damage_max_read_length - k + 1) removes that
+# approximation entirely; k is typically 29, so 47 covers a 75 bp window. This
+# costs memory in screen_unit and nothing in runtime.
+damage_fit_model:                true
+damage_model_min_stratum_reads:  100   # strata below this do not enter the fit
+
 # Damage-plot hit selection: all listed hit_criteria_flag tokens must be present.
 # (evenness intentionally excluded from plotting hit selection)
 damage_plot_required_hit_flags:

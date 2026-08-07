@@ -178,6 +178,7 @@ rule aggregate_sample:
         damage_stats      = "results/samples/{sample_id}/{sample_id}.damage_stats.tsv",
         damage_global     = "results/samples/{sample_id}/{sample_id}.damage_global.tsv",
         damage_strat      = "results/samples/{sample_id}/{sample_id}.damage_profile_stratified.tsv",
+        damage_model      = "results/samples/{sample_id}/{sample_id}.damage_model.tsv",
     params:
         out_damage_prefix      = "results/samples/{sample_id}/{sample_id}",
         min_reads              = config["damage_min_reads"],
@@ -186,6 +187,8 @@ rule aggregate_sample:
         min_plateau_window     = config["damage_min_plateau_window"],
         plateau_noise_factor   = config["damage_plateau_noise_factor"],
         adaptive_flag          = "--adaptive-plateau" if config["damage_adaptive_plateau"] else "--no-adaptive-plateau",
+        model_flag             = "--fit-damage-model" if config.get("damage_fit_model", True) else "--no-fit-damage-model",
+        model_min_stratum      = config.get("damage_model_min_stratum_reads", 100),
     resources:
         mem_mb   = config["resources"]["aggregate_sample"]["mem_mb"],
         runtime  = config["resources"]["aggregate_sample"]["runtime"],
@@ -204,6 +207,8 @@ rule aggregate_sample:
             --plateau-search-end   {params.plateau_search_end} \
             --min-plateau-window   {params.min_plateau_window} \
             --plateau-noise-factor {params.plateau_noise_factor} \
+            {params.model_flag:q} \
+            --damage-model-min-stratum-reads {params.model_min_stratum} \
             > {log:q} 2>&1
         """
 

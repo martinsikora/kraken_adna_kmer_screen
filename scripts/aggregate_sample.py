@@ -14,6 +14,7 @@ Outputs written to --out-damage-prefix:
   <prefix>.damage_stats.tsv
   <prefix>.damage_global.tsv
   <prefix>.damage_profile_stratified.tsv
+  <prefix>.damage_model.tsv
 """
 
 from __future__ import annotations
@@ -28,7 +29,9 @@ import pandas as pd
 from scipy import sparse
 
 from kraken_screen_lib import (
+    DAMAGE_MODEL_COLUMNS,
     compute_damage_stats,
+    fit_damage_models,
     load_damage_arrays,
     load_sparse_vector,
     merge_damage_accumulators,
@@ -61,6 +64,16 @@ def parse_args() -> argparse.Namespace:
                         help="Fixed plateau start (used when --no-adaptive-plateau)")
     parser.add_argument("--plateau-end",           type=int,   default=5,
                         help="Fixed plateau end (used when --no-adaptive-plateau)")
+
+    # Model-based damage estimation (emitted alongside damage_score)
+    parser.add_argument("--fit-damage-model",    action="store_true", default=True,
+                        help="Also fit the per-base damage model by deconvolving "
+                             "the k-mer window across read-length strata")
+    parser.add_argument("--no-fit-damage-model", action="store_false",
+                        dest="fit_damage_model")
+    parser.add_argument("--damage-model-min-stratum-reads", type=int, default=100,
+                        help="Strata with fewer reads than this do not contribute "
+                             "to the model fit")
     return parser.parse_args()
 
 
@@ -127,11 +140,22 @@ def main() -> None:
     profile_df       = merged_damage.to_dataframe(min_reads=args.min_reads)
     stratified_df    = merged_damage.to_dataframe_stratified(min_reads=args.min_reads)
 
+    # --- 4. Model-based damage, alongside damage_score (never replacing it) ---
+    if args.fit_damage_model:
+        model_df = fit_damage_models(
+            merged_damage,
+            min_reads         = args.min_reads,
+            min_stratum_reads = args.damage_model_min_stratum_reads,
+        )
+    else:
+        model_df = pd.DataFrame(columns=DAMAGE_MODEL_COLUMNS)
+
     prefix = args.out_damage_prefix
     write_tsv(f"{prefix}.damage_profile.tsv",            profile_df)
     write_tsv(f"{prefix}.damage_profile_stratified.tsv", stratified_df)
     write_tsv(f"{prefix}.damage_stats.tsv",              stats_df)
     write_tsv(f"{prefix}.damage_global.tsv",             global_df)
+    write_tsv(f"{prefix}.damage_model.tsv",              model_df)
 
     elapsed = time.perf_counter() - start
     print(

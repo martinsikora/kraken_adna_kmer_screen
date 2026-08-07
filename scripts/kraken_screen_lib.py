@@ -526,6 +526,15 @@ class DamageAccumulator:
         """Return (_5[key], _3[key]) — shape (max_pos, 2) count arrays."""
         return self._5[key], self._3[key]
 
+    def raw_stratified(self, key) -> tuple[np.ndarray, np.ndarray] | None:
+        """
+        Return (_s5[key], _s3[key]) — shape (n_strata, max_pos, 2) — or None
+        when this accumulator carries no strata for the key.
+        """
+        if key not in self._s5:
+            return None
+        return self._s5[key], self._s3[key]
+
     def to_dataframe(self, min_reads: int = 100) -> pd.DataFrame:
         rows = []
         for key in self.taxids():
@@ -594,6 +603,344 @@ class DamageAccumulator:
                             "kmer_size":         self.kmer_size,
                         })
         return pd.DataFrame(rows) if rows else pd.DataFrame(columns=cols)
+
+
+# ---------------------------------------------------------------------------
+# Model-based damage estimation (k-mer window deconvolution)
+# ---------------------------------------------------------------------------
+#
+# damage_score measures the drop from the terminal k-mer to a "plateau" further
+# in. That plateau is not always reached: a k-mer spans k bases, so for a read
+# of length L the k-mer at index j covers bases j..j+k-1, and no k-mer clears
+# both termini unless L >= k + 2*(damage decay length). For fragments not much
+# longer than k the profile is a U whose two arms are the two read ends, its
+# minimum sitting where the window is centred, at j = (L-k)/2. The plateau is
+# then still damage-contaminated and damage_score is a lower bound whose size
+# depends on read length -- so pooling it across a sample makes it depend on
+# that sample's fragment length distribution.
+#
+# This estimator instead treats the k-mer window as a known convolution and
+# inverts it. Per-base mismatch probability for a read of length L:
+#
+#     d_i = e + a5*exp(-i/lambda5) + a3*exp(-(L-1-i)/lambda3)
+#
+# where e is the interior floor (sequencing error plus divergence from the
+# reference) and the two exponentials are terminal damage. KrakenUniq matches
+# k-mers exactly, so a k-mer is classified only if every base in it matches:
+#
+#     P(k-mer at 5' index j unclassified) = 1 - prod_{i=j}^{j+k-1} (1 - d_i)
+#
+# The 3'-indexed counts are the same d vector read from the other end, so both
+# ends and every read-length stratum are deterministic functions of one
+# five-parameter theta. Fitting theta jointly across strata means:
+#   * no plateau is required -- e is estimated, not read off a window;
+#   * no read-length weighting is required -- theta describes the molecules,
+#     not which lengths happened to be sequenced;
+#   * short reads become informative rather than a nuisance, since their
+#     U-shape constrains a5, a3 and the decay lengths simultaneously;
+#   * output is a per-base rate, comparable to mapDamage and to published
+#     deamination rates, rather than an unclassified-k-mer fraction.
+#
+# Emitted alongside damage_score, never in place of it.
+#
+# Caveat carried in the output: k-mers within a read overlap, so the binomial
+# likelihood understates variance. chi2/df is reported and standard errors are
+# scaled by sqrt(chi2/df) (quasi-likelihood), which on synthetic controls runs
+# around 2-3.
+
+DAMAGE_MODEL_COLUMNS = [
+    "taxid", "species_name", "n_reads", "kmer_size",
+    "interior_rate", "interior_rate_se",
+    "damage_rate_5prime", "damage_rate_5prime_se", "decay_5prime",
+    "damage_rate_3prime", "damage_rate_3prime_se", "decay_3prime",
+    "terminal_rate_5prime", "terminal_rate_3prime",
+    "damage_model_pvalue_5prime", "damage_model_pvalue_3prime",
+    "chi2_df", "n_obs", "n_strata_used", "converged",
+]
+
+# log-space bounds: (interior, amp5, decay5, amp3, decay3)
+_DM_LO = np.log(np.array([1e-7, 1e-7, 0.2, 1e-7, 0.2]))
+_DM_HI = np.log(np.array([0.5,  0.9,  60.0, 0.9,  60.0]))
+
+
+def _stratum_length_weights(
+    n_by_pos: np.ndarray, lo: int, hi: int, kmer_size: int, max_pos: int,
+) -> list[tuple[int, float]]:
+    """
+    Recover the read-length composition inside one stratum from its own counts.
+
+    A read contributes to k-mer index j only when it has more than j k-mers, so
+    n_by_pos[j] is the number of reads with n_kmers > j and the difference
+    between neighbouring positions is the number with exactly that many. No
+    extra storage is needed. Reads with n_kmers >= max_pos are censored into the
+    last position and are represented by the midpoint of the range the stratum
+    still allows.
+
+    Returns [(read_length, n_reads), ...].
+    """
+    if kmer_size <= 0 or n_by_pos.size == 0 or n_by_pos[0] <= 0:
+        return []
+    out: list[tuple[int, float]] = []
+    for t in range(1, max_pos):
+        m = float(n_by_pos[t - 1] - n_by_pos[t])
+        if m > 0:
+            out.append((t + kmer_size - 1, m))
+    censored = float(n_by_pos[max_pos - 1])
+    if censored > 0:
+        nk_max = hi - kmer_size + 1
+        nk_rep = max_pos if nk_max <= max_pos else (max_pos + nk_max) // 2
+        out.append((int(nk_rep) + kmer_size - 1, censored))
+    return out
+
+
+def _build_damage_design(
+    arr5: np.ndarray, arr3: np.ndarray, strata: list, kmer_size: int,
+    max_pos: int, min_stratum_reads: int,
+):
+    """
+    Flatten the stratified count arrays into vectors for the fit.
+
+    Each observation is one (stratum, end, k-mer index). Each observation draws
+    on several read lengths, so a second set of vectors maps observation ->
+    (read length, weight, window start, window end); predictions are formed per
+    length and summed back with bincount.
+    """
+    obs_n, obs_u = [], []
+    m_obs, m_len, m_w, m_lo = [], [], [], []
+    lengths: dict[int, int] = {}
+    n_strata_used = 0
+
+    for si, (lo_len, hi_len) in enumerate(strata):
+        comp5 = _stratum_length_weights(arr5[si, :, 0], lo_len, hi_len,
+                                        kmer_size, max_pos)
+        if not comp5 or sum(w for _, w in comp5) < min_stratum_reads:
+            continue
+        n_strata_used += 1
+        for end, arr in (("5prime", arr5), ("3prime", arr3)):
+            for j in range(max_pos):
+                n_j = float(arr[si, j, 0])
+                if n_j <= 0:
+                    continue
+                oid = len(obs_n)
+                obs_n.append(n_j)
+                obs_u.append(float(arr[si, j, 1]))
+                for L, w in comp5:
+                    # window must lie inside the read
+                    start = j if end == "5prime" else L - kmer_size - j
+                    if start < 0 or start + kmer_size > L:
+                        continue
+                    if L not in lengths:
+                        lengths[L] = len(lengths)
+                    m_obs.append(oid)
+                    m_len.append(lengths[L])
+                    m_w.append(w)
+                    m_lo.append(start)
+
+    if not obs_n or not m_obs:
+        return None
+
+    Lvals = np.zeros(len(lengths), dtype=np.int64)
+    for L, idx in lengths.items():
+        Lvals[idx] = L
+
+    d = dict(
+        obs_n = np.asarray(obs_n, dtype=float),
+        obs_u = np.asarray(obs_u, dtype=float),
+        m_obs = np.asarray(m_obs, dtype=np.int64),
+        m_len = np.asarray(m_len, dtype=np.int64),
+        m_w   = np.asarray(m_w,   dtype=float),
+        m_lo  = np.asarray(m_lo,  dtype=np.int64),
+        Lvals = Lvals,
+        Lmax  = int(Lvals.max()),
+        kmer_size = kmer_size,
+        n_strata_used = n_strata_used,
+    )
+    # weights actually reaching each observation; the residual normalises by
+    # this rather than obs_n, since a length can be dropped by the window test
+    d["m_tot"] = np.bincount(d["m_obs"], weights=d["m_w"],
+                             minlength=len(obs_n))
+    keep = d["m_tot"] > 0
+    if not keep.all():
+        remap = -np.ones(len(obs_n), dtype=np.int64)
+        remap[keep] = np.arange(int(keep.sum()))
+        sel = remap[d["m_obs"]] >= 0
+        d["obs_n"] = d["obs_n"][keep]
+        d["obs_u"] = d["obs_u"][keep]
+        d["m_tot"] = d["m_tot"][keep]
+        d["m_obs"] = remap[d["m_obs"][sel]]
+        d["m_len"] = d["m_len"][sel]
+        d["m_w"]   = d["m_w"][sel]
+        d["m_lo"]  = d["m_lo"][sel]
+    if d["obs_n"].size == 0:
+        return None
+    return d
+
+
+def _damage_residual(log_theta: np.ndarray, d: dict) -> np.ndarray:
+    """
+    Pearson residual between observed and predicted unclassified fractions.
+
+    Standardised by the binomial SD of the prediction, not just weighted by
+    sqrt(n), so that chi2/df is interpretable: ~1 under a correct model with
+    independent k-mers, and above 1 by the factor that overlapping k-mers
+    within a read inflate the variance.
+    """
+    e, a5, l5, a3, l3 = np.exp(log_theta)
+    Lv = d["Lvals"][:, None]
+    i = np.arange(d["Lmax"])[None, :]
+    dv = e + a5 * np.exp(-i / l5) + a3 * np.exp(-(Lv - 1 - i) / l3)
+    dv = np.where(i < Lv, np.clip(dv, 1e-12, 1.0 - 1e-12), 0.0)
+    C = np.concatenate(
+        [np.zeros((dv.shape[0], 1)), np.cumsum(np.log1p(-dv), axis=1)], axis=1
+    )
+    lo = d["m_lo"]
+    q = 1.0 - np.exp(C[d["m_len"], lo + d["kmer_size"]] - C[d["m_len"], lo])
+    u_pred = np.bincount(d["m_obs"], weights=d["m_w"] * q,
+                         minlength=d["obs_n"].size)
+    pred = np.clip(u_pred / d["m_tot"], 1e-9, 1.0 - 1e-9)
+    sd = np.sqrt(pred * (1.0 - pred) / d["obs_n"])
+    return (d["obs_u"] / d["obs_n"] - pred) / sd
+
+
+def fit_damage_model_one(
+    arr5: np.ndarray, arr3: np.ndarray, strata: list, kmer_size: int,
+    max_pos: int, min_stratum_reads: int = 100,
+) -> dict | None:
+    """
+    Fit the five-parameter damage model to one taxon's stratified counts.
+
+    Returns None when there is not enough stratified data to attempt a fit.
+    Returns a dict with converged=False rather than raising when the fit fails,
+    so a bad taxon cannot take down a whole sample.
+    """
+    from scipy.optimize import least_squares
+
+    d = _build_damage_design(arr5, arr3, strata, kmer_size, max_pos,
+                             min_stratum_reads)
+    if d is None:
+        return None
+    n_obs = int(d["obs_n"].size)
+    n_par = 5
+    if n_obs <= n_par:
+        return None
+
+    # start from the data: interior floor from the smallest observed fraction,
+    # terminal amplitude from the excess at index 0, both per base
+    frac = d["obs_u"] / d["obs_n"]
+    f_min = float(np.clip(frac.min(), 1e-9, 0.99))
+    f_max = float(np.clip(frac.max(), f_min + 1e-9, 0.999))
+    e0 = 1.0 - (1.0 - f_min) ** (1.0 / max(kmer_size, 1))
+    a0 = max(1.0 - (1.0 - f_max) ** (1.0 / max(kmer_size, 1)) - e0, 1e-5)
+
+    best = None
+    for lam0 in (2.0, 6.0):
+        p0 = np.log(np.clip(np.array([e0, a0, lam0, a0, lam0]),
+                            np.exp(_DM_LO), np.exp(_DM_HI)))
+        try:
+            fit = least_squares(_damage_residual, p0, args=(d,),
+                                bounds=(_DM_LO, _DM_HI), max_nfev=4000)
+        except Exception:
+            continue
+        if best is None or fit.cost < best.cost:
+            best = fit
+    if best is None:
+        return dict(converged=False, n_obs=n_obs,
+                    n_strata_used=d["n_strata_used"])
+
+    theta = np.exp(best.x)
+    dof = max(n_obs - n_par, 1)
+    chi2 = float(np.sum(best.fun ** 2))
+    disp = chi2 / dof
+
+    # quasi-likelihood covariance, then delta method back from log space
+    se = np.full(n_par, np.nan)
+    try:
+        JTJ = best.jac.T @ best.jac
+        cov_log = np.linalg.inv(JTJ) * disp
+        se_log = np.sqrt(np.clip(np.diag(cov_log), 0, None))
+        se = theta * se_log
+    except np.linalg.LinAlgError:
+        pass
+
+    def _p(amp, amp_se):
+        if not np.isfinite(amp_se) or amp_se <= 0:
+            return np.nan
+        return 0.5 * math.erfc((amp / amp_se) / math.sqrt(2.0))
+
+    return dict(
+        interior_rate              = float(theta[0]),
+        interior_rate_se           = float(se[0]),
+        damage_rate_5prime         = float(theta[1]),
+        damage_rate_5prime_se      = float(se[1]),
+        decay_5prime               = float(theta[2]),
+        damage_rate_3prime         = float(theta[3]),
+        damage_rate_3prime_se      = float(se[3]),
+        decay_3prime               = float(theta[4]),
+        terminal_rate_5prime       = float(theta[0] + theta[1]),
+        terminal_rate_3prime       = float(theta[0] + theta[3]),
+        damage_model_pvalue_5prime = _p(theta[1], se[1]),
+        damage_model_pvalue_3prime = _p(theta[3], se[3]),
+        chi2_df                    = float(disp),
+        n_obs                      = n_obs,
+        n_strata_used              = int(d["n_strata_used"]),
+        converged                  = bool(best.success),
+    )
+
+
+def fit_damage_models(
+    acc: "DamageAccumulator", min_reads: int = 100,
+    min_stratum_reads: int = 100, verbose: bool = True,
+) -> pd.DataFrame:
+    """
+    Fit the damage model for every taxon with enough stratified reads.
+
+    Returns an empty frame (correct columns) when the accumulator carries no
+    strata or no k-mer size, so callers can write the file unconditionally.
+    """
+    if not acc.strata or acc.kmer_size <= 0:
+        if verbose:
+            reason = ("no read-length strata" if not acc.strata
+                      else "k-mer size unknown")
+            print(f"[damage_model] skipped: {reason}", file=sys.stderr,
+                  flush=True)
+        return pd.DataFrame(columns=DAMAGE_MODEL_COLUMNS)
+
+    rows, n_fail = [], 0
+    for key in acc.taxids():
+        if acc.n_reads(key) < min_reads:
+            continue
+        strat = acc.raw_stratified(key)
+        if strat is None:
+            continue
+        arr5, arr3 = strat
+        res = fit_damage_model_one(arr5, arr3, acc.strata, acc.kmer_size,
+                                   acc.max_pos, min_stratum_reads)
+        if res is None:
+            continue
+        if not res.get("converged", False):
+            n_fail += 1
+        is_int = isinstance(key, int)
+        rows.append({
+            "taxid":        key if is_int else pd.NA,
+            "species_name": ""  if is_int else key,
+            "n_reads":      acc.n_reads(key),
+            "kmer_size":    acc.kmer_size,
+            **res,
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=DAMAGE_MODEL_COLUMNS)
+    df = pd.DataFrame(rows)
+    for c in DAMAGE_MODEL_COLUMNS:
+        if c not in df.columns:
+            df[c] = np.nan
+    df = df[DAMAGE_MODEL_COLUMNS]
+    if verbose:
+        med = df["chi2_df"].median()
+        print(f"[damage_model] fitted {len(df)} taxa "
+              f"({n_fail} not converged), median chi2/df={med:.2f}",
+              file=sys.stderr, flush=True)
+    return df.sort_values("damage_rate_5prime", ascending=False).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------

@@ -384,6 +384,7 @@ The integrated summary table and per-sample damage PDFs are built by the default
 | `{sample_id}.damage_stats.tsv` | Per-species per-end damage statistics and plateau estimates |
 | `{sample_id}.damage_profile.tsv` | Per-species absolute-position damage profiles |
 | `{sample_id}.damage_profile_stratified.tsv` | Per-species absolute-position profiles split by read-length stratum |
+| `{sample_id}.damage_model.tsv` | Per-species per-base damage rates from k-mer window deconvolution |
 | `{sample_id}.coverage.tsv` | Per-taxon coverage and evenness statistics |
 | `{sample_id}.damage_profile.pdf` | Absolute-position damage plots (hit species) |
 | `{sample_id}.damage_summary.pdf` | Damage biplot across all profiled taxa |
@@ -413,6 +414,66 @@ The integrated summary table and per-sample damage PDFs are built by the default
 | `cov` | Breadth of k-mer coverage (fraction of genome represented) |
 | `dup` | Mean k-mer depth (total k-mers / unique k-mers) |
 | `hit_criteria_flag` | Semicolon-delimited passing criteria tokens from: `damage_pvalue`, `evenness_index`, `within_genus_relative_abundance`, `classified_rate` |
+
+---
+
+## Model-based damage estimation
+
+`damage_score` is the drop from the terminal k-mer to a plateau further into the
+read. That plateau is not always reached. A k-mer spans `k` bases, so for a read
+of length `L` the k-mer at index `j` covers bases `j … j+k-1`, and no k-mer
+clears both termini unless `L ≥ k + 2·(decay length)`. For fragments not much
+longer than `k` the profile is a U whose two arms are the two read ends, its
+minimum at `j = (L-k)/2`. The "plateau" is then still damaged, so `damage_score`
+is a lower bound whose magnitude depends on read length — which makes any pooled
+value depend on the sample's fragment length distribution.
+
+`{sample_id}.damage_model.tsv` sidesteps this by treating the k-mer window as a
+known convolution and inverting it. Per-base mismatch probability:
+
+```
+d_i = interior_rate
+    + damage_rate_5prime · exp(-i / decay_5prime)
+    + damage_rate_3prime · exp(-(L-1-i) / decay_3prime)
+```
+
+KrakenUniq matches k-mers exactly, so a k-mer is classified only if every base
+in it matches, and `P(k-mer at 5' index j unclassified) = 1 - Π_{i=j}^{j+k-1} (1 - d_i)`.
+The 3′-indexed counts are the same `d` vector read from the other end, so both
+ends and every read-length stratum are functions of one five-parameter fit. No
+plateau is needed (`interior_rate` is estimated), no read-length weighting is
+needed (the parameters describe the molecules, not which lengths were
+sequenced), short reads become informative rather than a nuisance, and the
+output is a per-base rate comparable to mapDamage.
+
+The read-length composition inside each stratum is recovered from the
+per-position counts themselves — a read reaches index `j` only if it has more
+than `j` k-mers, so neighbouring positions differ by the number of reads with
+exactly that many. Reads with `n_kmers ≥ damage_max_pos` are censored into the
+last position and represented by a single length; setting `damage_max_pos` at or
+above `damage_max_read_length - k + 1` removes that approximation.
+
+This is emitted **alongside** `damage_score`, never in place of it. Hit criteria
+and plotting still use `damage_score`.
+
+| Column | Meaning |
+|---|---|
+| `interior_rate` | Per-base mismatch floor (sequencing error + divergence) |
+| `damage_rate_5prime` / `_3prime` | Terminal damage amplitude above the floor |
+| `decay_5prime` / `_3prime` | Exponential decay length, bp |
+| `terminal_rate_5prime` / `_3prime` | `interior_rate + damage_rate`, the rate at the terminal base |
+| `damage_model_pvalue_5prime` / `_3prime` | One-sided test that the amplitude exceeds zero |
+| `chi2_df` | Fit diagnostic — see caveat below |
+| `converged`, `n_obs`, `n_strata_used` | Fit provenance |
+
+**Caveat on `chi2_df`.** k-mers within a read overlap, so the binomial
+likelihood understates variance; standard errors are scaled by `sqrt(chi2/df)`
+as a quasi-likelihood correction. For taxa with very many reads the exponential
+shape is a visible approximation and `chi2/df` reaches the hundreds, which
+inflates the standard errors and makes `damage_model_pvalue_*` conservative.
+Treat the rate estimates as the primary output and `chi2_df` as a fit-quality
+flag; on synthetic controls the estimates stay stable (≈10% spread) across
+stratum and `damage_max_pos` choices that move `damage_score` by ~280%.
 
 ---
 
