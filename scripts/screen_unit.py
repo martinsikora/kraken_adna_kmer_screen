@@ -106,6 +106,11 @@ def main() -> None:
     unclassified_mass = 0.0
     n_species_accumulated: set[str] = set()
     n_damage_reads = 0
+    # Summed over every classified read, not only the damage window: the
+    # coverage statistics this feeds are computed from all classified reads.
+    # coverage_evenness turns it into an estimate of genome coverage depth
+    # (reads * length / genome length) that does not involve dup.
+    read_length_sum = 0
 
     print(
         f"[screen_unit] starting: {args.kraken_class}",
@@ -154,6 +159,7 @@ def main() -> None:
                     read_len = int(length_str)
                 except ValueError:
                     continue
+                read_length_sum += read_len
                 # Damage is estimated only from reads within the length window.
                 # Reads at the sequencing read-length cap are truncated molecules
                 # whose 3' end is not a molecule terminus, and pooling lanes with
@@ -216,6 +222,8 @@ def main() -> None:
             "unclassified_feature_mass": unclassified_mass,
             "n_retained_features":      len(feature_counts),
             "n_species_accumulated":    len(n_species_accumulated),
+            "mean_read_length":         (read_length_sum / n_classified
+                                         if n_classified else 0.0),
             "damage_reads_in_window":   n_damage_reads,
             "damage_min_read_length":   args.min_read_length,
             "damage_max_read_length":   args.max_read_length,

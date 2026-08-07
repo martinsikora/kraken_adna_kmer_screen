@@ -154,6 +154,23 @@ This writes five files to the `--out-prefix` directory:
 Set `reference_dir` in your dataset's `config/config.yaml` to the directory containing
 these files.
 
+### Per-species genome lengths (optional)
+
+Needed only for the `evenness_depth` column in `coverage.tsv`. Also run once per
+database, from its `library_seq_info.tsv`:
+
+```bash
+python scripts/build_species_genome_lengths.py \
+    --library-seq-info /path/to/krakendb/library_seq_info.tsv \
+    --out /path/to/krakendb/kraken_adna_kmer_screen_db/species.genome_lengths.tsv
+```
+
+Genome length is the median across assemblies of the summed sequence lengths
+within an assembly. Summing every sequence for a species would multiply the
+genome by the number of assemblies; averaging sequence lengths would divide it
+by the number of replicons. Set `species_genome_lengths` in the dataset config
+to the output path, or leave it empty to omit the column.
+
 ### Taxonomy membership files
 
 The workflow also requires pre-built taxonomy membership files:
@@ -395,7 +412,7 @@ The integrated summary table and per-sample damage PDFs are built by the default
 | `{sample_id}.damage_profile.tsv` | Per-species absolute-position damage profiles |
 | `{sample_id}.damage_profile_stratified.tsv` | Per-species absolute-position profiles split by read-length stratum |
 | `{sample_id}.damage_model.tsv` | Per-species per-base damage rates from k-mer window deconvolution |
-| `{sample_id}.coverage.tsv` | Per-taxon coverage and evenness statistics |
+| `{sample_id}.coverage.tsv` | Per-taxon coverage and evenness statistics, incl. `evenness_depth` |
 | `{sample_id}.summary.tsv.gz` | This sample's slice of the integrated summary, hit flags included |
 | `{sample_id}.damage_profile.pdf` | Absolute-position damage plots (hit species) |
 | `{sample_id}.damage_summary.pdf` | Damage biplot across all profiled taxa |
@@ -517,6 +534,70 @@ taxa under `damage_min_reads` never enter the summary at all, since a
 `kmers`, `cov` and abundance rather than damage significance — but note that at
 ~100 reads `kmers` is only 2–4x the read count, so it measures how much evidence
 there is, not how evenly it is spread.
+
+---
+
+## Depth-normalised evenness (`evenness_depth`)
+
+`evenness_index = cov / (1 - exp(-dup·cov))` estimates coverage depth from
+`dup·cov`. That estimate is inflated by the very clumping the ratio is meant to
+detect, and at low depth `1 - exp(-dup·cov)` collapses to `dup·cov`, so the
+index reduces to `1/dup` and inherits `dup`'s dependence on sequencing depth.
+Measured across seven samples, `evenness_index` is exactly `1/dup` (median
+evenness × median dup = 1.000–1.009), and the fraction of taxa passing
+`> 0.5` ranges from 0.02% to 42%.
+
+`coverage.tsv` therefore also carries a second score whose depth estimate comes
+from read count and genome length instead:
+
+```
+depth_estimate = reads · mean_read_length / genome_length
+evenness_depth = cov / (1 - exp(-depth_estimate))
+```
+
+| criterion | cross-sample spread in pass rate |
+|---|---|
+| `evenness_index > 0.5` | 1884× |
+| `evenness_depth > 0.5` | **8.9×** |
+
+More importantly it carries signal the original does not. Against
+`interior_rate` from the damage model — the model's estimate of how badly reads
+match the reference away from the termini, so a proxy for misassignment —
+Spearman correlations are:
+
+| | `evenness_depth` | `evenness_index` | `cov` | `dup` |
+|---|---|---|---|---|
+| 018345 (n=5206) | **−0.196** | +0.042 | +0.047 | −0.042 |
+| DA195 (n=2250) | **−0.158** | +0.007 | +0.069 | −0.010 |
+
+`evenness_index`, `cov` and `dup` are all uncorrelated with misassignment, and
+two of them have the wrong sign.
+
+**Requirements.** Needs `species_genome_lengths` in the config (built once per
+database by `scripts/build_species_genome_lengths.py` from the database's
+`library_seq_info.tsv`) and per-unit summaries carrying `mean_read_length`.
+Either missing leaves the column NaN rather than guessing — so samples screened
+before `mean_read_length` was added need a re-screen to populate it.
+
+**`kmer_set_ratio` — read this before using the score.** `cov` is breadth
+against the union of taxon-discriminative k-mers across every strain in the
+database, not against a genome, so `evenness_depth` pairs a `cov` numerator with
+a genome denominator. `kmer_set_ratio = (kmers/cov) / genome_length` reports how
+far apart those are; near 1 the score is sound, far from 1 it is not. About 83%
+of taxa fall in 0.5–2. The failures are informative:
+
+- **Hepatitis B virus** sits at ~400 (9950 strains in the database). In DA195 it
+  is at 12× depth — the best-covered organism in the sample — but `cov`
+  saturates at 0.004, so `evenness_depth` wrongly reports 0.004.
+- **Yersinia pestis** sits at ~0.13, most of its genome being shared with
+  *Y. pseudotuberculosis* and assigned above the species node.
+
+Filter on `kmer_set_ratio` before comparing `evenness_depth` across species.
+Fixing this properly needs discriminative-k-mer counts per representative
+genome, which sequence lengths alone cannot provide.
+
+`evenness_depth` is an additional column and is **not** used by any hit
+criterion; `evenness_index` remains the criterion.
 
 ---
 

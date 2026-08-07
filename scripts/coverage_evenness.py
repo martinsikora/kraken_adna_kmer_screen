@@ -16,9 +16,40 @@ Evenness index (Lander-Waterman ratio):
   E ≈ 1 : coverage consistent with Poisson (uniform read placement)
   E < 1 : reads are clumped (observed breadth < Poisson expectation)
 
+A second, depth-normalised evenness score is emitted alongside it when a
+species genome-length table and the per-unit summaries are supplied:
+
+  evenness_depth = cov / (1 - exp(-depth_estimate))
+  depth_estimate = reads * mean_read_length / genome_length
+
+Same Lander-Waterman ratio, but the depth comes from read count and genome
+length rather than from dup. That matters because dup*cov is inflated by the
+very clumping the index is meant to detect: at low depth 1 - exp(-dup*cov)
+collapses to dup*cov, so evenness_index reduces to 1/dup and inherits dup's
+dependence on how deeply the sample was sequenced. Measured across seven
+samples, the fraction of taxa passing evenness_index > 0.5 varies 1884-fold;
+for evenness_depth > 0.5 it varies 8.9-fold. Against interior_rate from the
+damage model (a proxy for reads not really belonging to the taxon),
+evenness_depth correlates -0.20 / -0.16 on two samples while evenness_index,
+cov and dup are all uncorrelated (|rho| <= 0.07).
+
+evenness_depth is emitted as an extra column and is not used by any hit
+criterion; evenness_index remains the criterion.
+
 Output columns (all snake_case):
   sample_id, tax_id, rank, tax_name, reads, tax_reads, kmers,
-  dup, cov, evenness_index
+  dup, cov, evenness_index, genome_length, depth_estimate, evenness_depth,
+  kmer_set_ratio
+
+Caveat carried by kmer_set_ratio: cov is breadth against the union of
+taxon-discriminative k-mers over every strain in the database, not against the
+genome, so evenness_depth pairs a cov numerator with a genome denominator.
+kmer_set_ratio = (kmers/cov) / genome_length reports how far apart the two are.
+Near 1 the score is sound; far from 1 it is not. Hepatitis B virus sits at ~400
+(9950 strains), and its evenness_depth reads 0.004 despite 12x coverage.
+Yersinia pestis sits at ~0.13, most of its genome being shared with
+Y. pseudotuberculosis and assigned above the species node. Filter on
+kmer_set_ratio before using evenness_depth.
 """
 
 from __future__ import annotations
@@ -46,7 +77,58 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ranks",        nargs="+",
                         default=["species", "genus"],
                         help="Taxonomy ranks to include in output (e.g. species genus)")
+    parser.add_argument("--species-genome-lengths", default=None,
+                        help="TSV from build_species_genome_lengths.py. Enables "
+                             "the depth-normalised evenness_depth column; "
+                             "without it that column is written as NaN")
+    parser.add_argument("--unit-summaries", nargs="*", default=None,
+                        help="Per-unit summary.tsv files from screen_unit, used "
+                             "for the sample's mean classified read length")
     return parser.parse_args()
+
+
+def load_genome_lengths(path: str | None) -> dict:
+    """species tax_id -> genome length in bp. Empty dict when unavailable."""
+    if not path:
+        return {}
+    try:
+        g = pd.read_csv(path, sep="\t")
+    except Exception as exc:
+        print(f"[coverage_evenness] WARNING: could not read {path}: {exc}",
+              file=sys.stderr)
+        return {}
+    col = "genome_length_masked" if "genome_length_masked" in g.columns else "genome_length"
+    if "tax_id_species" not in g.columns or col not in g.columns:
+        print(f"[coverage_evenness] WARNING: {path} lacks expected columns",
+              file=sys.stderr)
+        return {}
+    g = g.dropna(subset=["tax_id_species", col])
+    return dict(zip(g["tax_id_species"].astype("int64"),
+                    pd.to_numeric(g[col], errors="coerce").astype(float)))
+
+
+def mean_read_length(paths: list | None) -> float:
+    """
+    Read-weighted mean classified read length across a sample's units.
+
+    Returns nan when the summaries are missing or predate the mean_read_length
+    column, which disables evenness_depth rather than guessing a length.
+    """
+    if not paths:
+        return float("nan")
+    tot_len = tot_n = 0.0
+    for p in paths:
+        try:
+            d = pd.read_csv(p, sep="\t")
+        except Exception:
+            continue
+        if "mean_read_length" not in d.columns or "classified_rows" not in d.columns:
+            continue
+        n = pd.to_numeric(d["classified_rows"], errors="coerce").fillna(0).sum()
+        m = pd.to_numeric(d["mean_read_length"], errors="coerce").fillna(0).sum()
+        tot_len += float(m) * float(n)
+        tot_n += float(n)
+    return tot_len / tot_n if tot_n > 0 else float("nan")
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +279,64 @@ def compute_evenness(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
+def compute_evenness_depth(
+    df: pd.DataFrame, genome_lengths: dict, read_len: float,
+) -> pd.DataFrame:
+    """
+    Add genome_length, depth_estimate and evenness_depth.
+
+    depth_estimate = reads * mean_read_length / genome_length, an estimate of
+    genome coverage depth that does not involve dup, so it is not inflated by
+    the clumping the ratio is testing for. Columns are NaN wherever the genome
+    length or the read length is unavailable.
+    """
+    d = df.copy()
+    n = len(d)
+    if not genome_lengths or not np.isfinite(read_len) or read_len <= 0:
+        d["genome_length"] = np.nan
+        d["depth_estimate"] = np.nan
+        d["evenness_depth"] = np.nan
+        d["kmer_set_ratio"] = np.nan
+        return d
+
+    tax = pd.to_numeric(d["tax_id"], errors="coerce")
+    glen = tax.map(genome_lengths).to_numpy(dtype=float)
+    reads = pd.to_numeric(d["reads"], errors="coerce").to_numpy(dtype=float)
+    cov = pd.to_numeric(d["cov"], errors="coerce").to_numpy(dtype=float)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        depth = reads * float(read_len) / glen
+        denom = -np.expm1(-depth)
+        ok = (np.isfinite(glen) & (glen > 0) & np.isfinite(cov) & (cov > 0)
+              & np.isfinite(denom) & (denom > 1e-12))
+        ev = np.where(ok, cov / np.where(denom > 1e-12, denom, np.nan), np.nan)
+
+    # cov's denominator is the union of taxon-discriminative k-mers across every
+    # strain in the database, which is not the genome. This ratio says how far
+    # apart the two are; evenness_depth mixes a cov numerator with a genome
+    # denominator, so it is only trustworthy where the ratio is near 1.
+    # Hepatitis B virus, with ~9950 strains, sits at ~400: cov saturates at
+    # 0.004 even at 12x depth, and evenness_depth wrongly calls it clumped.
+    # Yersinia pestis sits at ~0.13, most of its genome being shared with
+    # Y. pseudotuberculosis and so assigned above the species node.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kmer_set_ratio = np.where((cov > 0) & np.isfinite(glen) & (glen > 0),
+                                  (d["kmers"].to_numpy(dtype=float) / cov) / glen,
+                                  np.nan)
+
+    d["genome_length"] = glen
+    d["depth_estimate"] = np.where(np.isfinite(depth), depth, np.nan)
+    d["evenness_depth"] = ev
+    d["kmer_set_ratio"] = kmer_set_ratio
+    n_ok = int(np.isfinite(ev).sum())
+    print(
+        f"[coverage_evenness] evenness_depth: {n_ok:,}/{n:,} taxa "
+        f"(mean read length {read_len:.1f} bp)",
+        file=sys.stderr, flush=True,
+    )
+    return d
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -218,6 +358,8 @@ def main() -> None:
         empty = pd.DataFrame(columns=[
             "sample_id", "tax_id", "rank", "tax_name",
             "reads", "tax_reads", "kmers", "dup", "cov", "evenness_index",
+            "genome_length", "depth_estimate", "evenness_depth",
+            "kmer_set_ratio",
         ])
         write_tsv(args.out_coverage, empty)
         return
@@ -234,6 +376,11 @@ def main() -> None:
 
     # Compute evenness
     merged = compute_evenness(merged)
+    merged = compute_evenness_depth(
+        merged,
+        load_genome_lengths(args.species_genome_lengths),
+        mean_read_length(args.unit_summaries),
+    )
 
     # Add sample_id and reorder columns
     merged.insert(0, "sample_id", args.sample_id)
@@ -241,6 +388,7 @@ def main() -> None:
     output = merged[[
         "sample_id", "tax_id", "rank", "tax_name",
         "reads", "tax_reads", "kmers", "dup", "cov", "evenness_index",
+        "genome_length", "depth_estimate", "evenness_depth", "kmer_set_ratio",
     ]].reset_index(drop=True)
 
     write_tsv(args.out_coverage, output)

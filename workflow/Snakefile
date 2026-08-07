@@ -70,6 +70,18 @@ def get_sample_damage_arrays(wildcards):
 def damage_strata_args(wc=None):
     return [str(s) for s in config["damage_strata"]]
 
+def get_sample_summaries(wildcards):
+    return expand(
+        "results/units/{sample_id}/{unit_id}.summary.tsv",
+        sample_id=wildcards.sample_id,
+        unit_id=SAMPLE_UNITS[wildcards.sample_id],
+    )
+
+def genome_lengths_tokens(wc=None):
+    """--species-genome-lengths token, or nothing when not configured."""
+    path = config.get("species_genome_lengths", "")
+    return ["--species-genome-lengths", str(path)] if path else []
+
 def evenness_rank_args(wc=None):
     return [str(r) for r in config["evenness_ranks"]]
 
@@ -275,12 +287,17 @@ rule fit_abundance:
 rule coverage_evenness:
     input:
         reports = get_unit_reports,
+        # Only for the sample's mean classified read length, which turns
+        # evenness_depth's depth estimate into something independent of dup.
+        # These are small persistent files, not the temp() arrays.
+        summaries = get_sample_summaries,
     output:
         coverage = "results/samples/{sample_id}/{sample_id}.coverage.tsv",
     params:
         sample_id  = "{sample_id}",
         min_reads  = config["evenness_min_reads"],
         ranks      = evenness_rank_args(),
+        genome_lengths = genome_lengths_tokens(),
     resources:
         mem_mb   = config["resources"]["coverage_evenness"]["mem_mb"],
         runtime  = config["resources"]["coverage_evenness"]["runtime"],
@@ -294,6 +311,8 @@ rule coverage_evenness:
             --sample-id  {params.sample_id:q} \
             --min-reads  {params.min_reads} \
             --ranks      {params.ranks:q} \
+            --unit-summaries {input.summaries:q} \
+            {params.genome_lengths:q} \
             > {log:q} 2>&1
         """
 

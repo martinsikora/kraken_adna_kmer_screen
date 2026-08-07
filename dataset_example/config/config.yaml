@@ -173,3 +173,8 @@ resources:
   coverage_evenness: {mem_mb: 2000,  runtime: 10}
   aggregate_all:     {mem_mb: 8000,  runtime: 20}
   plot_damage:       {mem_mb: 4000,  runtime: 20}
+
+# Per-species genome lengths from build_species_genome_lengths.py, built once
+# per database from its library_seq_info.tsv. Enables the evenness_depth column
+# in coverage.tsv (see README); leave empty to omit that column.
+species_genome_lengths: /datasets/apollo/databases/krakenuniq/hum_microbe_20250624/kraken_adna_kmer_screen_db/species.genome_lengths.tsv
