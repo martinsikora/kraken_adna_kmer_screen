@@ -6,6 +6,7 @@
 # written by aggregate_sample.py (*_damage_fractional_profile.tsv).
 #
 #   X axis : fractional position along the read (0 = 5', 1 = 3')
+#   Colour : 5' half red, 3' half blue (mapDamage convention)
 #   Y axis : fraction of unclassified k-mers (%)
 #
 # One page per taxon, strata stacked in one column with free y scales.
@@ -272,18 +273,44 @@ build_page <- function(key) {
   dat <- dat[order(dat$stratum, dat$series, dat$frac), , drop = FALSE]
 
   series_levels <- unique(dat$series)
-  pal <- colours[vapply(series_levels, function(s) dat$sample_i[match(s, dat$series)], integer(1))]
   lty <- ltypes[vapply(series_levels, function(s) dat$sample_i[match(s, dat$series)], integer(1))]
-  names(pal) <- series_levels; names(lty) <- series_levels
+  names(lty) <- series_levels
   dat$series <- factor(dat$series, levels = series_levels)
 
+  # Split each line at the midpoint so the 5' half is red and the 3' half blue,
+  # matching plot_damage_profile.R and the mapDamage convention. Bin centres
+  # never land exactly on 0.5, so a point is interpolated there and given to
+  # both halves — otherwise the two segments would be drawn with a visible gap.
+  dat <- do.call(rbind, lapply(split(dat, list(dat$stratum, dat$series), drop = TRUE),
+    function(d) {
+      d <- d[order(d$frac), , drop = FALSE]
+      lo <- d[d$frac <= 0.5, , drop = FALSE]
+      hi <- d[d$frac >  0.5, , drop = FALSE]
+      if (nrow(lo) > 0L && nrow(hi) > 0L) {
+        x1 <- lo$frac[nrow(lo)]; y1 <- lo$pct[nrow(lo)]
+        x2 <- hi$frac[1];        y2 <- hi$pct[1]
+        ym <- y1 + (y2 - y1) * (0.5 - x1) / (x2 - x1)
+        mid_lo <- lo[nrow(lo), , drop = FALSE]; mid_lo$frac <- 0.5; mid_lo$pct <- ym
+        mid_hi <- hi[1, , drop = FALSE];        mid_hi$frac <- 0.5; mid_hi$pct <- ym
+        lo <- rbind(lo, mid_lo); hi <- rbind(mid_hi, hi)
+      }
+      if (nrow(lo)) lo$half <- "5prime"
+      if (nrow(hi)) hi$half <- "3prime"
+      rbind(lo, hi)
+    }))
+  dat$half <- factor(dat$half, levels = c("5prime", "3prime"))
+  end_pal <- c(`5prime` = "#d6604d", `3prime` = "#2166ac")
+
   ggplot(dat, aes(x = .data$frac, y = .data$pct,
-                  colour = .data$series, linetype = .data$series)) +
+                  colour = .data$half, linetype = .data$series,
+                  group = interaction(.data$series, .data$half))) +
     geom_vline(xintercept = 0.5, linetype = "dotted", colour = "grey60",
                linewidth = 0.3) +
     geom_line(linewidth = 0.7, alpha = 0.9) +
-    scale_colour_manual(values = pal, name = NULL) +
-    scale_linetype_manual(values = lty, name = NULL) +
+    # no colour guide: the x axis and midpoint rule already say which end is which
+    scale_colour_manual(values = end_pal, guide = "none") +
+    scale_linetype_manual(values = lty, name = NULL,
+                          guide = if (n_samp > 1L) "legend" else "none") +
     # Stacked in one column with per-stratum y ranges, not anchored at zero.
     # Strata are independent measurements at different read lengths, so free
     # scales cost little; anchoring at zero left the curve using a fifth to a
