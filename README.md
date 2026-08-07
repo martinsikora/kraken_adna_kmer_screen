@@ -255,7 +255,7 @@ Key parameters:
 | `damage_adaptive_plateau` | `true` | Auto-detect plateau window per taxon |
 | `damage_plateau_search_start` | `3` | Plateau search window start (positions from end) |
 | `damage_plateau_search_end` | `10` | Plateau search window end |
-| `damage_strata` | `["31-40","41-55","56-75","76-100"]` | Read-length strata (bp) |
+| `damage_strata` | `["31-55","56-75","76-100"]` | Read-length strata (bp); `plot_damage_fractional.R` can sum stored strata into wider bins without re-screening |
 | `damage_plot_required_hit_flags` | `["damage_pvalue","within_genus_relative_abundance","classified_rate"]` | Required hit tokens for selecting taxa in damage plots |
 | `damage_plot_max_keys` | `200` | Max taxa/pages per damage plot PDF |
 
@@ -289,8 +289,8 @@ therefore applies the test appropriate to each regime:
 |---|---|---|
 | `hit_evenness_mode` | `depth-aware` | `depth-aware` or `legacy` |
 | `hit_evenness_lambda_split` | `0.1` | `λ = dup·cov` boundary between regimes |
-| `hit_max_dup_shallow` | `3.0` | shallow (`λ` < split): `dup` < threshold |
-| `hit_min_cov_deep` | `0.05` | deep (`λ` ≥ split): `cov` > threshold |
+| `hit_max_dup_shallow` | `6.0` | shallow (`λ` < split): `dup` < threshold |
+| `hit_min_cov_deep` | `0.02` | deep (`λ` ≥ split): `cov` > threshold |
 | `hit_min_evenness` | `0.5` | `legacy` mode, and fallback when `dup`/`cov` are absent |
 
 Set `hit_evenness_mode: legacy` to restore the previous single-threshold

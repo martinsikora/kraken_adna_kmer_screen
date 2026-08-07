@@ -31,7 +31,8 @@ script_dir <- function() {
 }
 source(file.path(script_dir(), "plot_common.R"))
 
-DEFAULT_STRATA <- c("31-40", "41-55", "56-75", "76-100")
+# matches dataset_example/config/config.yaml; the workflow always passes --strata
+DEFAULT_STRATA <- c("31-55", "56-75", "76-100")
 STRATUM_COLOURS <- c("#d73027", "#fc8d59", "#4575b4", "#313695")
 SAMPLE_COLOURS <- c("#d6604d", "#2166ac", "#4dac26", "#8073ac")
 SAMPLE_LINETYPES <- c("solid", "dashed", "dotdash", "dotted")

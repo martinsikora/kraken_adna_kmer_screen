@@ -313,8 +313,8 @@ rule aggregate_all:
         hit_min_classified_rate = config.get("hit_min_classified_rate", 0.5),
         hit_evenness_mode          = config.get("hit_evenness_mode", "depth-aware"),
         hit_evenness_lambda_split  = config.get("hit_evenness_lambda_split", 0.1),
-        hit_max_dup_shallow        = config.get("hit_max_dup_shallow", 3.0),
-        hit_min_cov_deep           = config.get("hit_min_cov_deep", 0.05),
+        hit_max_dup_shallow        = config.get("hit_max_dup_shallow", 6.0),
+        hit_min_cov_deep           = config.get("hit_min_cov_deep", 0.02),
     resources:
         mem_mb   = config["resources"]["aggregate_all"]["mem_mb"],
         runtime  = config["resources"]["aggregate_all"]["runtime"],

@@ -67,8 +67,11 @@ damage_plateau_search_end:   10    # search window end
 damage_min_plateau_window:   3     # minimum plateau width
 damage_plateau_noise_factor: 2.0   # allowed noise multiple above plateau mean
 
-# Read-length strata for fractional damage profiles (lo-hi bp)
-damage_strata: ["31-40", "41-55", "56-75", "76-100"]
+# Read-length strata for fractional damage profiles (lo-hi bp).
+# screen_unit accumulates one array per stratum; plot_damage_fractional.R
+# can sum stored strata into wider requested bins, so regrouping for
+# plotting alone does not require re-screening.
+damage_strata: ["31-55", "56-75", "76-100"]
 
 # Damage-plot hit selection: all listed hit_criteria_flag tokens must be present.
 # (evenness intentionally excluded from plotting hit selection)
@@ -112,10 +115,14 @@ hit_min_classified_rate: 0.5    # plateau_classified_rate >= threshold
 #
 # Set hit_evenness_mode: legacy to restore the previous single-threshold
 # behaviour (evenness_index > hit_min_evenness).
+# The dup/cov thresholds below are deliberately permissive: this is an
+# initial screen for candidate ancient organisms, so the cost of carrying
+# extra low-evidence rows into triage is lower than that of discarding a
+# real one. Tighten them for a confirmatory pass.
 hit_evenness_mode:         depth-aware   # depth-aware | legacy
 hit_evenness_lambda_split: 0.1           # dup*cov boundary between regimes
-hit_max_dup_shallow:       3.0           # shallow regime: max k-mer duplication
-hit_min_cov_deep:          0.05          # deep regime: min breadth of coverage
+hit_max_dup_shallow:       6.0           # shallow regime: max k-mer duplication
+hit_min_cov_deep:          0.02          # deep regime: min breadth of coverage
 hit_min_evenness:          0.5           # legacy mode, and fallback when dup/cov absent
 
 # ---------------------------------------------------------------------------

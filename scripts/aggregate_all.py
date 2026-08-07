@@ -86,9 +86,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hit-evenness-lambda-split", type=float, default=0.1,
                         help="Mean genome depth (dup*cov) separating the shallow and "
                              "deep regimes in depth-aware mode")
-    parser.add_argument("--hit-max-dup-shallow",     type=float, default=3.0,
+    parser.add_argument("--hit-max-dup-shallow",     type=float, default=6.0,
                         help="Shallow regime: maximum dup (k-mer duplication)")
-    parser.add_argument("--hit-min-cov-deep",        type=float, default=0.05,
+    parser.add_argument("--hit-min-cov-deep",        type=float, default=0.02,
                         help="Deep regime: minimum cov (breadth of k-mer coverage)")
     return parser.parse_args()
 
@@ -274,8 +274,8 @@ def build_integrated_summary(
     hit_min_classified_rate: float,
     hit_evenness_mode: str = "depth-aware",
     hit_evenness_lambda_split: float = 0.1,
-    hit_max_dup_shallow: float = 3.0,
-    hit_min_cov_deep: float = 0.05,
+    hit_max_dup_shallow: float = 6.0,
+    hit_min_cov_deep: float = 0.02,
 ) -> pd.DataFrame:
     """
     Build one integrated sample-species table by outer-joining abundance, damage,
