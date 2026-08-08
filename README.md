@@ -33,7 +33,7 @@ Per sample:
 
 Per sample (auto):
   damage TSVs + that sample's hit flags ──► plot_damage ──► damage_profile.pdf
-                                            ──► damage_summary.pdf
+                                            ──► summary.pdf
 
 All samples:
   abundance + damage + coverage ──► aggregate_all ──► integrated summary table (.tsv.gz)
@@ -415,7 +415,7 @@ The integrated summary table and per-sample damage PDFs are built by the default
 | `{sample_id}.coverage.tsv` | Per-taxon coverage and evenness statistics, incl. `evenness_depth` |
 | `{sample_id}.summary.tsv.gz` | This sample's slice of the integrated summary, hit flags included |
 | `{sample_id}.damage_profile.pdf` | Absolute-position damage plots (hit species) |
-| `{sample_id}.damage_summary.pdf` | Damage biplot across all profiled taxa |
+| `{sample_id}.summary.pdf` | Damage biplot across all profiled taxa |
 
 ### Workflow-level summary (`results/summary/`)
 
@@ -655,7 +655,7 @@ Three PDFs are produced per sample:
   5′ and 3′ ends of each hit species. Shaded plateau region and per-end damage scores
   are annotated. One page per species.
 
-- **`damage_summary.pdf`** — Scatter plot of all profiled taxa. X axis: baseline
+- **`summary.pdf`** — Scatter plot of all profiled taxa. X axis: baseline
   classified k-mer rate; Y axis: damage score (%). Point size = log₁₀(reads);
   colour = `evenness_index` on a fixed 0–1 scale (grey where unavailable).
   Triangles = significant. Only selected hit species are annotated.

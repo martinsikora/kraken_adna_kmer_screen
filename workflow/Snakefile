@@ -125,7 +125,7 @@ rule all:
         expand(
             [
                 "results/samples/{sample_id}/{sample_id}.damage_profile.pdf",
-                "results/samples/{sample_id}/{sample_id}.damage_summary.pdf",
+                "results/samples/{sample_id}/{sample_id}.summary.pdf",
             ],
             sample_id=SAMPLES,
         ),
@@ -449,7 +449,7 @@ rule plot_damage:
         coverage = "results/samples/{sample_id}/{sample_id}.coverage.tsv",
     output:
         profile_pdf  = "results/samples/{sample_id}/{sample_id}.damage_profile.pdf",
-        summary_pdf  = "results/samples/{sample_id}/{sample_id}.damage_summary.pdf",
+        summary_pdf  = "results/samples/{sample_id}/{sample_id}.summary.pdf",
     params:
         sample_id                = "{sample_id}",
         max_pos                  = config["damage_max_pos"],
