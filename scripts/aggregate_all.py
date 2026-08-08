@@ -50,7 +50,16 @@ SUMMARY_OUTPUT_COLS = [
     "damage_pvalue", "damage_score_3prime",
     "plateau_classified_rate",
     "evenness_index", "cov", "dup", "kmers",
+    # Per-base damage rates from the k-mer window deconvolution (damage_model.tsv).
+    # terminal rate = interior_rate + damage_rate_*, so it is not carried here.
+    # Annotations only: no hit criterion uses them.
+    "interior_rate", "damage_rate_5prime", "damage_rate_3prime",
     "hit_criteria_flag",
+]
+
+DAMAGE_MODEL_COLS = [
+    "sample_id", "species_name",
+    "interior_rate", "damage_rate_5prime", "damage_rate_3prime",
 ]
 
 
@@ -66,6 +75,10 @@ def parse_args() -> argparse.Namespace:
                         help="Per-sample .damage_stats.tsv files")
     parser.add_argument("--coverage",      nargs="+", required=True,
                         help="Per-sample .coverage.tsv files")
+    parser.add_argument("--damage-model", nargs="*", default=None,
+                        help="Per-sample .damage_model.tsv files. Adds the "
+                             "per-base damage rates to the summary as "
+                             "annotations; omitted columns are written as NaN")
     parser.add_argument("--out-dir",     required=True,
                         help="Output directory for summary TSVs")
     parser.add_argument("--out-file",    default=None,
@@ -272,11 +285,25 @@ def _pass_evenness_criterion(
     return depth_aware.where(usable, legacy).astype(bool)
 
 
+def load_damage_model(paths: list | None) -> pd.DataFrame:
+    """Stack per-sample damage_model.tsv files, keeping only the rate columns."""
+    if not paths:
+        return pd.DataFrame(columns=DAMAGE_MODEL_COLS)
+    df = _load_typed_stack(list(paths), wanted_cols=DAMAGE_MODEL_COLS)
+    if df.empty:
+        return pd.DataFrame(columns=DAMAGE_MODEL_COLS)
+    if "species_name" in df.columns:
+        df["species_name"] = df["species_name"].astype(str)
+    # one row per (sample, species); the fit is already per taxon
+    return df.drop_duplicates(subset=["sample_id", "species_name"])
+
+
 def build_integrated_summary(
     abundance_df: pd.DataFrame,
     damage_df: pd.DataFrame,
     damage_stats_5prime_df: pd.DataFrame,
     coverage_df: pd.DataFrame,
+    damage_model_df: pd.DataFrame,
     hit_max_damage_pvalue: float,
     hit_min_evenness: float,
     hit_min_within_genus_ra: float,
@@ -333,6 +360,14 @@ def build_integrated_summary(
             on=["sample_id", "species_name"],
             how="left",
         )
+
+    # Per-base damage rates, left-joined so a taxon without a model fit keeps
+    # its row: the fit needs read-length strata above a minimum, so it covers
+    # fewer taxa than the damage profile does.
+    if damage_model_df is not None and not damage_model_df.empty:
+        cols = [c for c in DAMAGE_MODEL_COLS if c in damage_model_df.columns]
+        merged = merged.merge(damage_model_df[cols],
+                              on=["sample_id", "species_name"], how="left")
 
     # Keep only rows where all required evidence types are present:
     # abundance + evenness + damage + classified rate.
@@ -682,11 +717,13 @@ def main() -> None:
     damage_df_all = load_damage(args.damage)
     coverage_df = load_coverage(args.coverage)
     damage_stats_5prime_df = load_damage_stats_5prime(args.damage_stats)
+    damage_model_df = load_damage_model(args.damage_model)
     summary_df = build_integrated_summary(
         abundance_df=abundance_df_all,
         damage_df=damage_df_all,
         damage_stats_5prime_df=damage_stats_5prime_df,
         coverage_df=coverage_df,
+        damage_model_df=damage_model_df,
         hit_max_damage_pvalue=args.hit_max_damage_pvalue,
         hit_min_evenness=args.hit_min_evenness,
         hit_min_within_genus_ra=args.hit_min_within_genus_ra,

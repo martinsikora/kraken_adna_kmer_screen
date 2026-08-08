@@ -338,6 +338,7 @@ rule summarize_sample:
         damage        = "results/samples/{sample_id}/{sample_id}.damage_global.tsv",
         damage_stats  = "results/samples/{sample_id}/{sample_id}.damage_stats.tsv",
         coverage      = "results/samples/{sample_id}/{sample_id}.coverage.tsv",
+        damage_model  = "results/samples/{sample_id}/{sample_id}.damage_model.tsv",
     output:
         summary = "results/samples/{sample_id}/{sample_id}.summary.tsv.gz",
     params:
@@ -362,6 +363,7 @@ rule summarize_sample:
             --damage         {input.damage:q} \
             --damage-stats   {input.damage_stats:q} \
             --coverage       {input.coverage:q} \
+            --damage-model   {input.damage_model:q} \
             --out-dir        {params.out_dir:q} \
             --out-file       {output.summary:q} \
             --hit-max-damage-pvalue   {params.hit_max_damage_pvalue} \
@@ -387,6 +389,7 @@ rule aggregate_all:
         damage        = expand("results/samples/{sample_id}/{sample_id}.damage_global.tsv", sample_id=SAMPLES),
         damage_stats  = expand("results/samples/{sample_id}/{sample_id}.damage_stats.tsv", sample_id=SAMPLES),
         coverage      = expand("results/samples/{sample_id}/{sample_id}.coverage.tsv", sample_id=SAMPLES),
+        damage_model  = expand("results/samples/{sample_id}/{sample_id}.damage_model.tsv", sample_id=SAMPLES),
     output:
         summary   = "results/summary/all_samples.summary.tsv.gz",
     params:
@@ -411,6 +414,7 @@ rule aggregate_all:
             --damage         {input.damage:q} \
             --damage-stats   {input.damage_stats:q} \
             --coverage       {input.coverage:q} \
+            --damage-model   {input.damage_model:q} \
             --out-dir    {params.out_dir:q} \
             --hit-max-damage-pvalue   {params.hit_max_damage_pvalue} \
             --hit-min-evenness        {params.hit_min_evenness} \

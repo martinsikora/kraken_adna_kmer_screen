@@ -441,7 +441,21 @@ The integrated summary table and per-sample damage PDFs are built by the default
 | `evenness_index` | Lander-Waterman evenness (1 = Poisson-uniform, <1 = clumped) |
 | `cov` | Breadth of k-mer coverage (fraction of genome represented) |
 | `dup` | Mean k-mer depth (total k-mers / unique k-mers) |
+| `interior_rate` | Per-base mismatch floor from the damage model (see below) |
+| `damage_rate_5prime` / `_3prime` | Per-base terminal damage rate, above that floor |
 | `hit_criteria_flag` | Semicolon-delimited passing criteria tokens from: `damage_pvalue`, `evenness_index`, `within_genus_relative_abundance`, `classified_rate` |
+
+The three rate columns are joined from each sample's `damage_model.tsv` as
+**annotations** — no hit criterion uses them, and the join is a left merge, so a
+taxon whose strata fall below `damage_model_min_stratum_reads` keeps its row
+with NaN rates (about 10% of rows). The terminal rate is not carried, being
+exactly `interior_rate + damage_rate_*`.
+
+They separate two artifact classes that `damage_score` alone conflates: an
+impossible deamination rate (*Hydrogenimonas cancrithermarum* at
+`damage_rate_5prime` 0.59, *Arcobacter venerupis* at 0.34 — both with near-zero
+`interior_rate`), versus reads that do not match the reference away from the
+termini (`interior_rate` 1.9–2.6%, the misassignment signature).
 
 ---
 
