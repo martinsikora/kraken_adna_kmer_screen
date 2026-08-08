@@ -36,7 +36,9 @@ COV_COLS = [
 ]
 DAMAGE_STATS_COLS = ["sample_id", "species_name", "end", "plateau_frac_unc"]
 HIT_FLAG_LABELS = [
-    "damage_pvalue",
+    # damage significance AND a biologically possible damage rate; see
+    # _pass_damage_criterion
+    "damage_rate",
     "evenness_index",
     "within_genus_relative_abundance",
     "classified_rate",
@@ -91,7 +93,13 @@ def parse_args() -> argparse.Namespace:
                              "this option is what lets the workflow build a "
                              "per-sample summary without waiting for the rest.")
     parser.add_argument("--hit-max-damage-pvalue",   type=float, default=0.05,
-                        help="Maximum damage_pvalue for hit table")
+                        help="Maximum damage_pvalue for the damage_rate criterion")
+    parser.add_argument("--hit-max-damage-rate",     type=float, default=0.4,
+                        help="Maximum damage_rate_5prime for the damage_rate "
+                             "criterion. Single-strand deamination cannot exceed "
+                             "~0.5 per base, so a fitted rate above this is not a "
+                             "damage profile; taxa without a model fit are not "
+                             "rejected by it")
     parser.add_argument("--hit-min-evenness",        type=float, default=0.5,
                         help="Minimum evenness_index for hit table (legacy mode, "
                              "and fallback when dup/cov are unavailable)")
@@ -305,6 +313,7 @@ def build_integrated_summary(
     coverage_df: pd.DataFrame,
     damage_model_df: pd.DataFrame,
     hit_max_damage_pvalue: float,
+    hit_max_damage_rate: float,
     hit_min_evenness: float,
     hit_min_within_genus_ra: float,
     hit_min_classified_rate: float,
@@ -380,7 +389,21 @@ def build_integrated_summary(
     has_classified_rate = _series_numeric(merged, "plateau_classified_rate").notna()
     merged = merged[has_abundance & has_evenness & has_damage & has_classified_rate].copy()
 
-    pass_damage = (_series_numeric(merged, "damage_pvalue") < hit_max_damage_pvalue).fillna(False)
+    # damage_rate: significant damage AND a rate that damage could produce.
+    # Deamination in a single-stranded overhang saturates around 0.5 per base,
+    # so a fitted terminal rate above hit_max_damage_rate is not damage but a
+    # taxon whose reads mismatch the reference throughout -- the profile's
+    # terminal excess is then an artefact of misassignment. Measured here:
+    # Hydrogenimonas cancrithermarum 0.59 and Arcobacter venerupis 0.34, both
+    # at ~160 reads with near-zero interior_rate, so an interior-rate test would
+    # not catch them. A taxon with no model fit has NaN and is left to the
+    # p-value alone rather than rejected, since absence of a fit is not evidence.
+    rate = _series_numeric(merged, "damage_rate_5prime")
+    implausible = (rate > hit_max_damage_rate).fillna(False)
+    pass_damage = (
+        (_series_numeric(merged, "damage_pvalue") < hit_max_damage_pvalue).fillna(False)
+        & ~implausible
+    )
     pass_evenness = _pass_evenness_criterion(
         merged,
         mode=hit_evenness_mode,
@@ -725,6 +748,7 @@ def main() -> None:
         coverage_df=coverage_df,
         damage_model_df=damage_model_df,
         hit_max_damage_pvalue=args.hit_max_damage_pvalue,
+        hit_max_damage_rate=args.hit_max_damage_rate,
         hit_min_evenness=args.hit_min_evenness,
         hit_min_within_genus_ra=args.hit_min_within_genus_ra,
         hit_min_classified_rate=args.hit_min_classified_rate,

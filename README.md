@@ -443,7 +443,16 @@ The integrated summary table and per-sample damage PDFs are built by the default
 | `dup` | Mean k-mer depth (total k-mers / unique k-mers) |
 | `interior_rate` | Per-base mismatch floor from the damage model (see below) |
 | `damage_rate_5prime` / `_3prime` | Per-base terminal damage rate, above that floor |
-| `hit_criteria_flag` | Semicolon-delimited passing criteria tokens from: `damage_pvalue`, `evenness_index`, `within_genus_relative_abundance`, `classified_rate` |
+| `hit_criteria_flag` | Semicolon-delimited passing criteria tokens from: `damage_rate`, `evenness_index`, `within_genus_relative_abundance`, `classified_rate` |
+
+`damage_rate` combines two tests: `damage_pvalue < hit_max_damage_pvalue` **and**
+`damage_rate_5prime <= hit_max_damage_rate` (default 0.4). Deamination in a
+single-stranded overhang saturates near 0.5 per base, so a higher fitted rate is
+not a damage profile but a taxon whose reads mismatch the reference throughout,
+with the terminal excess an artefact of misassignment. A taxon with no model fit
+has NaN and is judged on the p-value alone rather than rejected. On dev_test
+this removes one hit of 59, *Hydrogenimonas cancrithermarum* at 0.59 — a
+deep-sea vent bacterium with 160 reads and p = 3e-16.
 
 The three rate columns are joined from each sample's `damage_model.tsv` as
 **annotations** — no hit criterion uses them, and the join is a left merge, so a

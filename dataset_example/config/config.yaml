@@ -113,7 +113,7 @@ damage_model_min_stratum_reads:  100   # strata below this do not enter the fit
 # Damage-plot hit selection: all listed hit_criteria_flag tokens must be present.
 # (evenness intentionally excluded from plotting hit selection)
 damage_plot_required_hit_flags:
-  - damage_pvalue
+  - damage_rate
   - within_genus_relative_abundance
   - classified_rate
 
@@ -136,7 +136,14 @@ evenness_ranks: [species, genus]   # taxonomic ranks to report
 # ---------------------------------------------------------------------------
 # Summary / hit table thresholds
 # ---------------------------------------------------------------------------
+# The damage_rate hit criterion combines two tests: damage must be significant
+# AND its fitted per-base rate must be one damage could produce. Deamination in
+# a single-stranded overhang saturates near 0.5 per base, so a higher fitted
+# rate means the reads mismatch the reference throughout and the terminal excess
+# is a misassignment artefact. Taxa with no model fit are judged on the p-value
+# alone rather than rejected.
 hit_max_damage_pvalue:   0.05   # damage_pvalue < threshold
+hit_max_damage_rate:     0.4    # damage_rate_5prime <= threshold
 hit_min_within_genus_ra: 0.1    # within_genus_relative_abundance >= threshold
 hit_min_classified_rate: 0.5    # plateau_classified_rate >= threshold
 

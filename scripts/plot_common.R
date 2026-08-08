@@ -161,7 +161,7 @@ select_hit_species <- function(hits_path, sample_id,
 
 resolve_required_hit_flags <- function(flags) {
   if (length(flags) > 0L) return(flags)
-  c("damage_pvalue", "within_genus_relative_abundance", "classified_rate")
+  c("damage_rate", "within_genus_relative_abundance", "classified_rate")
 }
 
 # ---------------------------------------------------------------------------

@@ -112,7 +112,7 @@ def damage_plot_required_hit_flags(wc=None):
     flags = config.get("damage_plot_required_hit_flags", None)
     if flags:
         return [str(f) for f in flags]
-    return ["damage_pvalue", "within_genus_relative_abundance", "classified_rate"]
+    return ["damage_rate", "within_genus_relative_abundance", "classified_rate"]
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +344,7 @@ rule summarize_sample:
     params:
         out_dir                    = "results/samples/{sample_id}",
         hit_max_damage_pvalue      = config["hit_max_damage_pvalue"],
+        hit_max_damage_rate        = config.get("hit_max_damage_rate", 0.4),
         hit_min_evenness           = config["hit_min_evenness"],
         hit_min_within_genus_ra    = config["hit_min_within_genus_ra"],
         hit_min_classified_rate    = config.get("hit_min_classified_rate", 0.5),
@@ -367,6 +368,7 @@ rule summarize_sample:
             --out-dir        {params.out_dir:q} \
             --out-file       {output.summary:q} \
             --hit-max-damage-pvalue   {params.hit_max_damage_pvalue} \
+            --hit-max-damage-rate     {params.hit_max_damage_rate} \
             --hit-min-evenness        {params.hit_min_evenness} \
             --hit-min-within-genus-ra {params.hit_min_within_genus_ra} \
             --hit-min-classified-rate {params.hit_min_classified_rate} \
@@ -395,6 +397,7 @@ rule aggregate_all:
     params:
         out_dir              = "results/summary",
         hit_max_damage_pvalue   = config["hit_max_damage_pvalue"],
+        hit_max_damage_rate     = config.get("hit_max_damage_rate", 0.4),
         hit_min_evenness        = config["hit_min_evenness"],
         hit_min_within_genus_ra = config["hit_min_within_genus_ra"],
         hit_min_classified_rate = config.get("hit_min_classified_rate", 0.5),
@@ -417,6 +420,7 @@ rule aggregate_all:
             --damage-model   {input.damage_model:q} \
             --out-dir    {params.out_dir:q} \
             --hit-max-damage-pvalue   {params.hit_max_damage_pvalue} \
+            --hit-max-damage-rate     {params.hit_max_damage_rate} \
             --hit-min-evenness        {params.hit_min_evenness} \
             --hit-min-within-genus-ra {params.hit_min_within_genus_ra} \
             --hit-min-classified-rate {params.hit_min_classified_rate} \

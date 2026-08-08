@@ -40,7 +40,7 @@ source(file.path(script_dir(), "plot_common.R"))
 MARKER_ALPHA <- 0.8
 
 ALL_HIT_FLAG_TOKENS <- c(
-  "damage_pvalue", "evenness_index",
+  "damage_rate", "evenness_index",
   "within_genus_relative_abundance", "classified_rate"
 )
 
