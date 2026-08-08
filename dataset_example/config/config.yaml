@@ -166,10 +166,23 @@ hit_min_evenness:          0.5           # legacy mode, and fallback when dup/co
 # Compute resources (mem_mb: MB RAM; runtime: minutes)
 # Adjust for your cluster / scheduler.
 # ---------------------------------------------------------------------------
+# runtime is minutes and is a wall-clock limit under SLURM: a job that exceeds
+# it is killed, so these are sized for the largest sample you expect rather than
+# the typical one. Overshooting costs only scheduling priority.
+#
+# screen_unit is one streaming pass per lane and scales linearly with reads.
+# Measured on idle cluster nodes at ~140k reads/s, and ~4x slower on a busy
+# shared node, so budget from the slow figure: a 1.2e9-read lane took 2.3 h on
+# an idle node and would take ~9 h on a contended one. 900 minutes covers that
+# with room; the old 60 killed anything past ~2.5e8 reads.
+#
+# aggregate_sample now includes the per-taxon damage model fit at ~107 ms per
+# taxon: 4 min for 2253 taxa, 12 min for 5219. The old 20 was marginal for
+# diverse samples.
 resources:
-  screen_unit:       {mem_mb: 4000,  runtime: 60}
-  aggregate_sample:  {mem_mb: 8000,  runtime: 20}
-  fit_abundance:     {mem_mb: 16000, runtime: 30}
+  screen_unit:       {mem_mb: 4000,  runtime: 900}
+  aggregate_sample:  {mem_mb: 8000,  runtime: 120}
+  fit_abundance:     {mem_mb: 16000, runtime: 90}
   coverage_evenness: {mem_mb: 2000,  runtime: 10}
   aggregate_all:     {mem_mb: 8000,  runtime: 20}
   plot_damage:       {mem_mb: 4000,  runtime: 20}
