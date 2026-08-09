@@ -56,6 +56,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-genus-file",      action="append", default=[])
     parser.add_argument("--restrict-to-target-genus-features", action="store_true")
     parser.add_argument("--min-genus-relative-abundance", type=float, default=0.0)
+    # Evidence guarantee: taxa the fast-mode shortlist may not discard.
+    parser.add_argument("--guarantee-coverage",      default="",
+                        help="coverage.tsv for this sample. Any species meeting the "
+                             "--guarantee-* thresholds below, and the genus holding it, "
+                             "is exempt from the fast-mode candidate shortlist. Empty "
+                             "string disables the guarantee.")
+    parser.add_argument("--guarantee-min-reads",     type=int,   default=70)
+    parser.add_argument("--guarantee-lambda-split",  type=float, default=0.1)
+    parser.add_argument("--guarantee-max-dup-shallow", type=float, default=6.0)
+    parser.add_argument("--guarantee-min-cov-deep",  type=float, default=0.02)
     return parser.parse_args()
 
 
@@ -102,6 +112,67 @@ def load_species_and_genus_metadata(
         lambda t: str(genus_lookup[t][1]) if t in genus_lookup else str(species_name_lookup[int(t)])
     )
     return species_df, genus_lookup
+
+
+def load_guaranteed_taxa(
+    coverage_path: str | Path,
+    species_df:    pd.DataFrame,
+    min_reads:     int,
+    lambda_split:  float,
+    max_dup_shallow: float,
+    min_cov_deep:  float,
+) -> tuple[set[str], set[int]]:
+    """
+    Species (by name) and their genera (by taxid) that the shortlist must keep.
+
+    In fast mode the shortlist ranks candidates by absolute shared k-mer mass,
+    so a taxon with a small reference loses to any 1024 better-covered ones no
+    matter how good its own evidence is -- a 3.2 kb virus cannot outweigh a
+    bacterium on that scale. Anything dropped there is silently absent from
+    abundance.tsv and therefore from the hit table, even when its damage and
+    coverage statistics are strong.
+
+    The guarantee is read off coverage.tsv, which is computed independently of
+    this fit, and applies the same depth-aware evenness test used for hit
+    selection: read count alone admits most of a diverse sample (up to 1934
+    extra genera in Saqqaq), while requiring the reads to be spread over the
+    genome holds the addition to a few hundred.
+
+    Returns (species_names, genus_taxids); both empty when coverage_path is "".
+    """
+    if not str(coverage_path):
+        return set(), set()
+    cov = pd.read_csv(coverage_path, sep="\t")
+    needed = {"tax_name", "rank", "reads", "dup", "cov"}
+    missing = needed - set(cov.columns)
+    if missing:
+        raise ValueError(f"{coverage_path}: missing column(s) {sorted(missing)}")
+    cov = cov[cov["rank"].astype(str) == "species"].copy()
+    reads = pd.to_numeric(cov["reads"], errors="coerce")
+    dup   = pd.to_numeric(cov["dup"],   errors="coerce")
+    breadth = pd.to_numeric(cov["cov"], errors="coerce")
+    # Same regime split as the evenness hit criterion: below the split, mean
+    # depth is far under 1 and duplication is the informative statistic; above
+    # it, breadth is.
+    lam   = dup * breadth
+    even  = np.where(lam < lambda_split, dup < max_dup_shallow, breadth > min_cov_deep)
+    keep  = cov[(reads >= min_reads).fillna(False) & pd.Series(even, index=cov.index).fillna(False)]
+    names = set(keep["tax_name"].astype(str))
+
+    name_to_genus = dict(
+        zip(species_df["species_name"].astype(str),
+            species_df["genus_taxid"].astype(int))
+    )
+    genera = {name_to_genus[n] for n in names if n in name_to_genus}
+    return names, genera
+
+
+def protected_rows_for_names(row_df: pd.DataFrame, names: set[str]) -> np.ndarray:
+    """Row positions in row_df whose species_name is guaranteed."""
+    if not names or "species_name" not in row_df.columns:
+        return np.zeros(0, dtype=np.int32)
+    mask = row_df["species_name"].astype(str).isin(names).to_numpy()
+    return np.flatnonzero(mask).astype(np.int32)
 
 
 def load_reference_feature_taxids(reference_features: str | Path) -> np.ndarray:
@@ -308,8 +379,10 @@ def fit_candidate_rows(
     fit_mode: str,
     fit_constraint: str,
     max_candidates: int,
+    protected_rows: np.ndarray | None = None,
 ) -> tuple[np.ndarray, sparse.csr_matrix, np.ndarray, float, int, Dict[str, object]]:
     cand_after = int(candidate_list.size)
+    n_guaranteed = 0
     if candidate_list.size == 0:
         empty_ref = reference_subset[candidate_list, :].tocsr()
         return candidate_list, empty_ref, np.zeros(0, dtype=np.float64), 0.0, cand_after, {
@@ -328,7 +401,19 @@ def fit_candidate_rows(
             }
         if candidate_list.size > max_candidates:
             pos = np.argpartition(scores, -max_candidates)[-max_candidates:]
-            ord_ = pos[np.argsort(scores[pos])[::-1]]
+            keep_mask = np.zeros(candidate_list.size, dtype=bool)
+            keep_mask[pos] = True
+            # Guaranteed rows are added to the top-N, not substituted into it,
+            # so raising the guarantee never displaces a candidate the mass
+            # ranking would have kept. Rows already dropped for a non-positive
+            # score stay dropped: they share no k-mers with the sample and
+            # would take a zero coefficient anyway.
+            if protected_rows is not None and protected_rows.size:
+                prot = np.isin(candidate_list, protected_rows)
+                n_guaranteed = int((prot & ~keep_mask).sum())
+                keep_mask |= prot
+            sel  = np.flatnonzero(keep_mask)
+            ord_ = sel[np.argsort(scores[sel])[::-1]]
             candidate_list = candidate_list[ord_]
         cand_after = int(candidate_list.size)
     if candidate_list.size == 0:
@@ -344,6 +429,7 @@ def fit_candidate_rows(
         a = candidate_reference.transpose().toarray()
         coef, res_norm = nnls(a, sample_data)
         solver_info = {"solver_success": True, "solver_status": "success", "solver_message": "nnls"}
+    solver_info["n_guaranteed_added"] = int(n_guaranteed)
     return candidate_list, candidate_reference, coef, float(res_norm), cand_after, solver_info
 
 
@@ -396,6 +482,7 @@ def fit_level(
     fit_constraint: str,
     max_candidates: int,
     max_feature_support: int,
+    protected_rows: np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, Dict[str, object], np.ndarray, np.ndarray]:
     stage_start = time.perf_counter()
     reference_subset, filtered_features, filtered_data, subset_info, candidate_list = \
@@ -417,6 +504,7 @@ def fit_level(
             "n_candidate_species": 0, "n_nonzero_species": 0,
             "residual_l2_norm": 0.0, "total_explained_feature_mass": 0.0,
             "candidate_species_after_shortlist": 0,
+            "candidate_species_guaranteed": 0,
             "fit_mode": fit_mode, "fit_constraint": fit_constraint,
             "max_candidates": int(max_candidates), "max_feature_support": int(max_feature_support),
             "stage_elapsed_seconds": float(time.perf_counter() - stage_start),
@@ -425,6 +513,7 @@ def fit_level(
 
     candidate_list, candidate_reference, coef, res_norm, cand_after, solver_info = fit_candidate_rows(
         reference_subset, candidate_list, filtered_data, fit_mode, fit_constraint, max_candidates,
+        protected_rows,
     )
     result_df, coef_sum, explained_sum, n_nonzero = format_result_frame(
         row_df, candidate_list, coef, candidate_reference, fit_constraint,
@@ -437,6 +526,7 @@ def fit_level(
         "residual_l2_norm": float(res_norm if filtered_data.size else 0.0),
         "total_explained_feature_mass": float(explained_sum),
         "candidate_species_after_shortlist": int(cand_after),
+        "candidate_species_guaranteed": int(solver_info.get("n_guaranteed_added", 0)),
         "fit_mode": fit_mode, "fit_constraint": fit_constraint,
         "solver_success": bool(solver_info.get("solver_success", True)),
         "solver_status": str(solver_info.get("solver_status", "")),
@@ -548,9 +638,15 @@ def main() -> None:
                 sample_feature_list, sample_data, ref_feat_taxids, genus_lookup, tg_taxids,
             )
 
+        guaranteed_names, _ = load_guaranteed_taxa(
+            args.guarantee_coverage, species_df, args.guarantee_min_reads,
+            args.guarantee_lambda_split, args.guarantee_max_dup_shallow,
+            args.guarantee_min_cov_deep,
+        )
         fit_df, fit_info, _, _ = fit_level(
             reference_matrix, species_df, sample_feature_list, sample_data,
             args.fit_mode, args.fit_constraint, args.max_candidates, args.max_feature_support,
+            protected_rows_for_names(species_df, guaranteed_names),
         )
         fit_df = add_species_within_genus_metrics(fit_df)
         fit_info["fit_elapsed_seconds"] = float(time.perf_counter() - start_time)
@@ -596,6 +692,11 @@ def main() -> None:
 
     n_feat_before_filter = int(sample_feature_list.size)
     mass_before_filter   = float(sample_data.sum())
+    guaranteed_names, guaranteed_genera = load_guaranteed_taxa(
+        args.guarantee_coverage, species_df, args.guarantee_min_reads,
+        args.guarantee_lambda_split, args.guarantee_max_dup_shallow,
+        args.guarantee_min_cov_deep,
+    )
 
     if n_feat_before_filter == 0:
         empty_fit = {
@@ -639,6 +740,7 @@ def main() -> None:
             sp_fit_df, sp_fit_info, _, _ = fit_level(
                 sp_subset_matrix, sp_subset_df, filtered_features, filtered_data,
                 args.fit_mode, args.fit_constraint, args.max_candidates, 0,
+                protected_rows_for_names(sp_subset_df, guaranteed_names),
             )
             sp_elapsed_total     += float(sp_fit_info["stage_elapsed_seconds"])
             sp_cand_before_total += int(sp_fit_info["candidate_species_before_filter"])
@@ -748,9 +850,14 @@ def main() -> None:
 
     # genus granularity
     genus_df, genus_reference, genus_species_indices = build_genus_metadata(species_df, species_reference_csr)
+    protected_genus_rows = (
+        np.flatnonzero(genus_df["genus_taxid"].astype(int).isin(guaranteed_genera).to_numpy()).astype(np.int32)
+        if guaranteed_genera else np.zeros(0, dtype=np.int32)
+    )
     genus_fit_df, genus_fit_info, filtered_features, filtered_data = fit_level(
         genus_reference, genus_df, sample_feature_list, sample_data,
         args.fit_mode, args.fit_constraint, args.max_candidates, args.max_feature_support,
+        protected_genus_rows,
     )
     species_result_frames_g: list[pd.DataFrame] = []
     sp_cand_before_total_g = sp_cand_after_total_g = sp_cand_shortlist_total_g = 0
@@ -767,6 +874,7 @@ def main() -> None:
         sp_fit_df, sp_fit_info, _, _ = fit_level(
             sp_subset_matrix, sp_subset_df, filtered_features, filtered_data,
             args.fit_mode, args.fit_constraint, args.max_candidates, args.max_feature_support,
+            protected_rows_for_names(sp_subset_df, guaranteed_names),
         )
         sp_elapsed_total_g      += float(sp_fit_info["stage_elapsed_seconds"])
         sp_cand_before_total_g  += int(sp_fit_info["candidate_species_before_filter"])
@@ -828,6 +936,9 @@ def main() -> None:
         "genus_candidate_species_before_filter": int(genus_fit_info["candidate_species_before_filter"]),
         "genus_candidate_species_after_filter":  int(genus_fit_info["candidate_species_after_filter"]),
         "genus_candidate_species_after_shortlist": int(genus_fit_info["candidate_species_after_shortlist"]),
+        "genus_candidate_species_guaranteed":      int(genus_fit_info.get("candidate_species_guaranteed", 0)),
+        "n_guaranteed_species": int(len(guaranteed_names)),
+        "n_guaranteed_genera":  int(len(guaranteed_genera)),
         "genus_n_nonzero":                 int(genus_fit_info["n_nonzero_species"]),
         "genus_residual_l2_norm":          float(genus_fit_info["residual_l2_norm"]),
         "genus_total_explained_feature_mass": float(genus_fit_info["total_explained_feature_mass"]),

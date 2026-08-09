@@ -104,6 +104,26 @@ def restrict_genus_features_tokens(wc=None):
         return ["--restrict-to-target-genus-features"]
     return []
 
+def shortlist_guarantee_tokens(wc=None):
+    """
+    --guarantee-* tokens exempting well-covered taxa from the fast-mode
+    shortlist, or nothing when shortlist_guarantee is disabled.
+
+    Emitting the coverage path here rather than in the shell command keeps the
+    whole guarantee in one place: with shortlist_guarantee false the script is
+    called exactly as it was before this option existed.
+    """
+    if not config.get("shortlist_guarantee", True):
+        return []
+    cov = f"results/samples/{wc.sample_id}/{wc.sample_id}.coverage.tsv"
+    return [
+        "--guarantee-coverage",       cov,
+        "--guarantee-min-reads",      str(config.get("shortlist_guarantee_min_reads", 70)),
+        "--guarantee-lambda-split",   str(config.get("hit_evenness_lambda_split", 0.1)),
+        "--guarantee-max-dup-shallow", str(config.get("hit_max_dup_shallow", 6.0)),
+        "--guarantee-min-cov-deep",   str(config.get("hit_min_cov_deep", 0.02)),
+    ]
+
 
 def damage_plot_required_hit_flags(wc=None):
     """
@@ -237,6 +257,10 @@ rule fit_abundance:
         species_metadata = config["reference_dir"] + "/reference.species.tsv",
         features         = config["reference_dir"] + "/reference.features.tsv",
         genus_taxids     = config["genus_taxids"],
+        # Evidence guarantee for the fast-mode shortlist. coverage_evenness
+        # reads only the KrakenUniq reports and the unit summaries, so it does
+        # not depend on this rule and the edge is acyclic.
+        coverage         = "results/samples/{sample_id}/{sample_id}.coverage.tsv",
     output:
         abundance = "results/samples/{sample_id}/{sample_id}.abundance.tsv",
         fit       = "results/samples/{sample_id}/{sample_id}.fit.tsv",
@@ -252,6 +276,7 @@ rule fit_abundance:
         target_genus_tokens        = target_genus_tokens(),
         target_genus_file_tokens   = target_genus_file_tokens(),
         restrict_genus_feat_tokens = restrict_genus_features_tokens(),
+        guarantee_tokens           = shortlist_guarantee_tokens(),
     resources:
         mem_mb   = config["resources"]["fit_abundance"]["mem_mb"],
         runtime  = config["resources"]["fit_abundance"]["runtime"],
@@ -275,6 +300,7 @@ rule fit_abundance:
             {params.target_genus_tokens:q} \
             {params.target_genus_file_tokens:q} \
             {params.restrict_genus_feat_tokens:q} \
+            {params.guarantee_tokens:q} \
             > {log:q} 2>&1
         """
 

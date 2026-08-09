@@ -50,6 +50,34 @@ min_genus_relative_abundance: 0.0  # genus RA threshold before within-genus fit
 target_genus: []
 target_genus_file: ""   # e.g. /path/to/kraken_adna_kmer_screen/inputs/genera_all.txt
 
+# Evidence guarantee for the fast-mode candidate shortlist.
+#
+# In fast mode the shortlist keeps only the max_candidates genera with the
+# largest absolute shared k-mer mass. That ranking is a magnitude, not a
+# measure of evidence, so a small reference always loses: Human mastadenovirus
+# C in one test sample carried 138 reads at 18.4% 5' damage (p=3e-5) and a
+# fitted damage rate of 0.22, yet its genus ranked 1439 of 3095 and was cut --
+# leaving no abundance row, and so no hit, while its damage and coverage
+# statistics stayed in the outputs looking perfectly healthy.
+#
+# When enabled, any species in coverage.tsv passing the thresholds below, and
+# the genus holding it, is added to the shortlist instead of competing for a
+# place in it. Requiring reads to be spread over the genome (the same
+# depth-aware evenness test used for hit selection) is what makes this
+# affordable: a read-count floor alone admits nearly the whole candidate set
+# in a diverse sample (+1934 genera), while adding the evenness test holds it
+# to a median +225.
+#
+# Normalising the shortlist score instead was tested and rejected: ranking by
+# fraction-of-reference-matched (L1) or cosine (L2) pushed these same viral
+# genera further down, because a multi-species viral genus sums every species
+# into its row while the sample matches one, and it evicted 101 of 434
+# existing hits.
+shortlist_guarantee:           true
+shortlist_guarantee_min_reads: 70
+# The evenness thresholds are shared with hit selection: hit_evenness_lambda_split,
+# hit_max_dup_shallow and hit_min_cov_deep, set further down.
+
 # If true, also drop sample features whose reference taxids do not map to any
 # target genus. Sharpens species discrimination when target genera are known.
 # Requires target_genus / target_genus_file to be non-empty.

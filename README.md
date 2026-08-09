@@ -270,6 +270,50 @@ Key parameters:
 | `min_genus_relative_abundance` | `0.0` | Minimum genus abundance before within-genus fit |
 | `target_genus` | `[]` | Inline list of genus names/taxids to fit |
 | `restrict_to_target_genus_features` | `false` | Drop features outside target genera |
+| `shortlist_guarantee` | `true` | Exempt well-covered taxa from the fast-mode shortlist |
+| `shortlist_guarantee_min_reads` | `70` | Reads a species needs to qualify for the exemption |
+
+#### Why the shortlist needs a guarantee
+
+In `fit_mode: fast` the candidate shortlist keeps only the `max_candidates`
+genera with the largest **absolute** shared k-mer mass. That is a magnitude,
+not a measure of evidence, and a genus row is the unnormalised sum of its
+species' reference weights, so a small viral genome is penalised twice: once
+for its size and once for having few species summed into its row. Anything cut
+never reaches NNLS, gets no `abundance.tsv` row, and so cannot appear in the
+hit table -- while its `damage_stats.tsv` and `coverage.tsv` rows survive
+intact and look perfectly healthy. The loss is silent.
+
+Measured on a 17-sample screen: *Human mastadenovirus C* in one sample carried
+138 reads at 18.4% 5' damage (p = 3e-5), a fitted damage rate of 0.22 and a
+duplication of 3.2, yet its genus ranked 1439 of 3095 candidates and was
+discarded. Across all samples 128 viral species had damage statistics but no
+abundance row.
+
+With `shortlist_guarantee` enabled, any species in `coverage.tsv` with at least
+`shortlist_guarantee_min_reads` reads that also passes the depth-aware evenness
+test -- the same `hit_evenness_lambda_split` / `hit_max_dup_shallow` /
+`hit_min_cov_deep` thresholds used for hit selection, so the two cannot drift
+apart -- is **added** to the shortlist along with its genus, rather than made
+to compete for a place in it. Nothing the mass ranking kept is displaced.
+
+The evenness test is what makes this affordable. A read-count floor alone
+admits most of a diverse sample (+1934 genera in one case); adding the evenness
+requirement holds it to a median +225. Measured cost on two samples, base
+versus guarantee, back to back on the same host: +598 candidates cost +16%
+runtime, +125 cost +12%. Existing results are untouched -- no species dropped,
+`within_genus_relative_abundance` identical to the last bit, and shifts of
+under 1e-3 in `genus_relative_abundance` from the wider NNLS.
+
+Normalising the shortlist score was tried first and rejected. Ranking by
+fraction-of-reference-matched (L1) or cosine (L2) pushed the same viral genera
+*further* down -- a multi-species viral genus sums every species into its row
+while the sample matches one, so its matched fraction is low -- and evicted 101
+of 434 existing hits. Raising `max_candidates` to remove the truncation
+entirely is the other option; it is correct but expensive, and an unbounded fit
+on these samples had not finished after an hour against ~4 minutes shortlisted.
+
+Set `shortlist_guarantee: false` to restore the previous behaviour exactly.
 
 ### aDNA damage
 
