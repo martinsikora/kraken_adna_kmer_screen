@@ -276,7 +276,9 @@ rule fit_abundance:
         target_genus_tokens        = target_genus_tokens(),
         target_genus_file_tokens   = target_genus_file_tokens(),
         restrict_genus_feat_tokens = restrict_genus_features_tokens(),
-        guarantee_tokens           = shortlist_guarantee_tokens(),
+        # Passed uncalled: unlike the other *_tokens helpers this one needs the
+        # wildcards, so Snakemake must invoke it per job rather than once here.
+        guarantee_tokens           = shortlist_guarantee_tokens,
     resources:
         mem_mb   = config["resources"]["fit_abundance"]["mem_mb"],
         runtime  = config["resources"]["fit_abundance"]["runtime"],
