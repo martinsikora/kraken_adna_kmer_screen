@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
                              "the k-mer window across read-length strata")
     parser.add_argument("--no-fit-damage-model", action="store_false",
                         dest="fit_damage_model")
-    parser.add_argument("--damage-model-min-stratum-reads", type=int, default=100,
+    parser.add_argument("--damage-model-min-stratum-reads", type=int, default=70,
                         help="Strata with fewer reads than this do not contribute "
                              "to the model fit")
     return parser.parse_args()

@@ -804,7 +804,7 @@ def _damage_residual(log_theta: np.ndarray, d: dict) -> np.ndarray:
 
 def fit_damage_model_one(
     arr5: np.ndarray, arr3: np.ndarray, strata: list, kmer_size: int,
-    max_pos: int, min_stratum_reads: int = 100,
+    max_pos: int, min_stratum_reads: int = 70,
 ) -> dict | None:
     """
     Fit the five-parameter damage model to one taxon's stratified counts.
@@ -889,7 +889,7 @@ def fit_damage_model_one(
 
 def fit_damage_models(
     acc: "DamageAccumulator", min_reads: int = 100,
-    min_stratum_reads: int = 100, verbose: bool = True,
+    min_stratum_reads: int = 70, verbose: bool = True,
 ) -> pd.DataFrame:
     """
     Fit the damage model for every taxon with enough stratified reads.

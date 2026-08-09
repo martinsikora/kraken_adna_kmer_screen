@@ -220,7 +220,7 @@ rule aggregate_sample:
         plateau_noise_factor   = config["damage_plateau_noise_factor"],
         adaptive_flag          = "--adaptive-plateau" if config["damage_adaptive_plateau"] else "--no-adaptive-plateau",
         model_flag             = "--fit-damage-model" if config.get("damage_fit_model", True) else "--no-fit-damage-model",
-        model_min_stratum      = config.get("damage_model_min_stratum_reads", 100),
+        model_min_stratum      = config.get("damage_model_min_stratum_reads", 70),
     resources:
         mem_mb   = config["resources"]["aggregate_sample"]["mem_mb"],
         runtime  = config["resources"]["aggregate_sample"]["runtime"],

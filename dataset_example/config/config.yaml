@@ -136,7 +136,14 @@ damage_strata: ["30-55", "56-75"]
 # approximation entirely; k is typically 29, so 47 covers a 75 bp window. This
 # costs memory in screen_unit and nothing in runtime.
 damage_fit_model:                true
-damage_model_min_stratum_reads:  100   # strata below this do not enter the fit
+# Strata below this do not enter the fit. Note the threshold is per stratum,
+# not per taxon: a taxon with 90 reads split 64/26 across two strata has no
+# qualifying stratum and gets no fit at all, so lowering this cannot rescue
+# every low-read taxon. Matching it to damage_min_reads keeps the model
+# available for as many taxa as the damage profile itself covers -- on the
+# 17-sample dev screen, moving 100 -> 70 added 10425 fits (67082 -> 77507) and
+# cut the share of summary rows with no fitted rate from 26% to 15%.
+damage_model_min_stratum_reads:  70
 
 # Damage-plot hit selection: all listed hit_criteria_flag tokens must be present.
 # (evenness intentionally excluded from plotting hit selection)

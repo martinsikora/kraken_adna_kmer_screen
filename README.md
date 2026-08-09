@@ -494,15 +494,23 @@ The integrated summary table and per-sample damage PDFs are built by the default
 single-stranded overhang saturates near 0.5 per base, so a higher fitted rate is
 not a damage profile but a taxon whose reads mismatch the reference throughout,
 with the terminal excess an artefact of misassignment. A taxon with no model fit
-has NaN and is judged on the p-value alone rather than rejected. On dev_test
-this removes one hit of 59, *Hydrogenimonas cancrithermarum* at 0.59 — a
-deep-sea vent bacterium with 160 reads and p = 3e-16.
+has NaN and is judged on the p-value alone rather than rejected. On the
+17-sample dev screen the cutoff vetoes 1322 rows that have a significant
+p-value, 48 of which would otherwise pass the other criteria — concentrated in
+the environmental samples (34 in Kolyma_River, 9 in Saqqaq), and many sitting at
+the 0.9 parameter bound with damage scores of 0.5–0.98.
 
-The three rate columns are joined from each sample's `damage_model.tsv` as
-**annotations** — no hit criterion uses them, and the join is a left merge, so a
-taxon whose strata fall below `damage_model_min_stratum_reads` keeps its row
-with NaN rates (about 10% of rows). The terminal rate is not carried, being
-exactly `interior_rate + damage_rate_*`.
+The three rate columns are joined from each sample's `damage_model.tsv` by a
+left merge, so a taxon with no qualifying stratum keeps its row with NaN rates
+(about 15% of rows at the default threshold). `damage_rate_5prime` feeds the
+`damage_rate` criterion above; `interior_rate` and `damage_rate_3prime` are
+annotations. The terminal rate is not carried, being exactly
+`interior_rate + damage_rate_*`.
+
+`damage_model_min_stratum_reads` is a **per-stratum** floor, so lowering it does
+not rescue every low-read taxon: a taxon with 90 reads split 64/26 across two
+strata still has no qualifying stratum. On the 17-sample dev screen, 42 of the
+54 rate-less hits are missing for that reason and rest on the p-value alone.
 
 They separate two artifact classes that `damage_score` alone conflates: an
 impossible deamination rate (*Hydrogenimonas cancrithermarum* at
