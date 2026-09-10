@@ -16,16 +16,14 @@ Combines:
 
 from __future__ import annotations
 
-import argparse
 import csv
 import gzip
 import io
 import json
 import sys
 import math
-from collections import defaultdict
 from pathlib import Path
-from typing import DefaultDict, Dict, Iterable, Iterator, List, Sequence, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -60,116 +58,20 @@ def write_tsv(path: str | Path, frame: pd.DataFrame) -> None:
 
 
 # ---------------------------------------------------------------------------
-# KrakenUniq row streaming
-# ---------------------------------------------------------------------------
-
-def iter_kraken_rows(path: str | Path) -> Iterator[Tuple[str, str, str, str, str]]:
-    with open_maybe_gzip(path, "rt") as handle:
-        for row_number, line in enumerate(handle, start=1):
-            if line.startswith("#"):
-                continue
-            row = line.rstrip("\n").split("\t", 4)
-            if len(row) != 5:
-                raise ValueError(
-                    f"{path}: expected 5 columns at row {row_number}, found {len(row)}"
-                )
-            yield tuple(row)  # type: ignore[return-value]
-
-
-# ---------------------------------------------------------------------------
 # Kmer string parsers
 # ---------------------------------------------------------------------------
-
-def parse_sparse_taxid_counts(
-    payload: str,
-    exclude_taxids: set[str] | None = None,
-) -> Dict[int, float]:
-    """Parse 'taxid:count ...' payload into {taxid: total_count}."""
-    exclude_taxids = exclude_taxids or set()
-    counts: DefaultDict[int, float] = defaultdict(float)
-    if not payload:
-        return {}
-    for token in payload.split():
-        if ":" not in token:
-            continue
-        taxid_text, count_text = token.split(":", 1)
-        if taxid_text in exclude_taxids:
-            continue
-        try:
-            taxid = int(taxid_text)
-            count = float(count_text)
-        except ValueError:
-            continue
-        if count > 0:
-            counts[taxid] += count
-    return dict(counts)
-
-
-def parse_kmer_string(s: str) -> np.ndarray:
-    """
-    Expand compact kmer string 'taxid:count ...' into a per-kmer array of
-    taxids (0 = unclassified). Ambiguous 'A' tokens treated as 0.
-    Returns numpy int64 array in 5'->3' order.
-    """
-    tids: List[int] = []
-    counts: List[int] = []
-    for token in s.strip().split():
-        if ":" not in token:
-            continue
-        tid, cnt = token.rsplit(":", 1)
-        try:
-            tids.append(0 if tid == "A" else int(tid))
-            counts.append(int(cnt))
-        except ValueError:
-            pass
-    if not tids:
-        return np.empty(0, dtype=np.int64)
-    return np.repeat(np.array(tids, dtype=np.int64), counts)
-
-
-def parse_kmer_string_with_counts(
-    s: str,
-    exclude_set: set[int],
-) -> tuple[np.ndarray, Dict[int, float]]:
-    """
-    Single-pass parser that returns both:
-    - per_kmer_array: numpy int64 array for damage accumulation (5'->3')
-    - taxid_counts: {taxid: total_count} for NNLS feature vectorization
-                    (excludes taxids in exclude_set)
-
-    Combining both outputs from one token pass eliminates redundant string
-    parsing when doing the unified single-pass analysis.
-    """
-    tids: List[int] = []
-    counts: List[int] = []
-    taxid_counts: Dict[int, float] = {}
-
-    for token in s.strip().split():
-        if ":" not in token:
-            continue
-        tid_str, cnt_str = token.rsplit(":", 1)
-        try:
-            taxid = 0 if tid_str == "A" else int(tid_str)
-            count = int(cnt_str)
-        except ValueError:
-            continue
-        tids.append(taxid)
-        counts.append(count)
-        if count > 0 and taxid not in exclude_set:
-            taxid_counts[taxid] = taxid_counts.get(taxid, 0.0) + count
-
-    if not tids:
-        return np.empty(0, dtype=np.int64), taxid_counts
-    return np.repeat(np.array(tids, dtype=np.int64), counts), taxid_counts
-
 
 def parse_kmer_string_runs(
     s: str,
     exclude_set: set[int],
+    ambig_taxid: int = 0,
 ) -> tuple[list, list, Dict[int, float], int, int]:
     """
-    Run-length variant of parse_kmer_string_with_counts: returns the (taxid,
-    count) runs as-is instead of expanding them to one entry per k-mer.
+    Single-pass parser over the compact 'taxid:count ...' k-mer string,
+    returning the (taxid, count) runs as-is instead of expanding them to one
+    entry per k-mer. Ambiguous 'A' tokens are mapped to ambig_taxid, which
+    defaults to 0 so they count as unclassified; pass a sentinel (e.g. -1)
+    to keep them distinguishable (used by diag_ambiguous_kmers.py).
 
     The expanded array is only ever consumed as (a) the first and last max_pos
     entries, (b) a binned histogram, and (c) two scalar sums — all of which are
@@ -189,7 +91,7 @@ def parse_kmer_string_runs(
             continue
         tid_str, cnt_str = token.rsplit(":", 1)
         try:
-            taxid = 0 if tid_str == "A" else int(tid_str)
+            taxid = ambig_taxid if tid_str == "A" else int(tid_str)
             count = int(cnt_str)
         except ValueError:
             continue
@@ -362,10 +264,14 @@ def load_sparse_matrix_for_column_slicing(path: str | Path) -> sparse.csc_matrix
     sidecar = csc_sidecar_path(path)
     if sidecar.exists():
         return sparse.load_npz(sidecar).tocsc()
-    csr_matrix = sparse.load_npz(path).tocsr()
-    csc_matrix = csr_matrix.tocsc()
-    sparse.save_npz(sidecar, csc_matrix)
-    return csc_matrix
+    # No sidecar: convert in memory only. Writing it here would race between
+    # concurrent jobs and requires write access to the (shared) database dir.
+    print(
+        f"WARNING: no CSC sidecar at {sidecar}; converting in memory. "
+        "Rebuild the reference with build_reference_matrix.py to create it.",
+        file=sys.stderr,
+    )
+    return sparse.load_npz(path).tocsc()
 
 
 def save_sparse_vector(
@@ -436,6 +342,10 @@ class DamageAccumulator:
                  kmer_size: int = 0):
         self.max_pos = max_pos
         self.strata = list(strata) if strata else []
+        # Optional taxid -> species_name lookup used by the dataframe/stats
+        # emitters when keys are int taxids. Not serialised; set it after
+        # loading (aggregate_sample does this from --species-taxids).
+        self.key_names: dict = {}
         # k is not stated anywhere in the classify file, but follows from any
         # read: n_kmers = length - k + 1. Recording it lets the damage plot
         # label each k-mer index with the read bases it spans.
@@ -464,30 +374,12 @@ class DamageAccumulator:
             self._s3[key] = np.zeros((ns, self.max_pos, 2), dtype=np.int64)
             self._sn[key] = np.zeros(ns, dtype=np.int64)
 
-    def add_read(self, key, kmers: np.ndarray):
-        nk = len(kmers)
-        if nk == 0:
-            return
-        if key not in self._5:
-            self._init_key(key)
-        self._n[key] += 1
-        n5 = min(nk, self.max_pos)
-
-        # 5' end: first n5 k-mers
-        self._5[key][:n5, 0] += 1
-        self._5[key][:n5, 1] += (kmers[:n5] == 0).astype(np.int64)
-
-        # 3' end: last n5 k-mers in reverse
-        tail = kmers[nk - n5:][::-1]
-        self._3[key][:n5, 0] += 1
-        self._3[key][:n5, 1] += (tail == 0).astype(np.int64)
-
     def add_flags(self, key, n5: int, head: np.ndarray, tail: np.ndarray,
                   stratum_idx: int = -1):
         """
-        Run-length equivalent of add_read: takes precomputed unclassified flags
-        for the first and last n5 positions (3' already reversed) instead of the
-        expanded k-mer array. State and arithmetic are identical to add_read.
+        Book one read into the accumulator from precomputed unclassified flags
+        for the first and last n5 positions (3' already reversed), as produced
+        by end_flags_from_runs.
 
         stratum_idx, when >= 0, also books the read into that read-length
         stratum; the pooled arrays are updated either way.
@@ -510,6 +402,12 @@ class DamageAccumulator:
 
     def taxids(self):
         return list(self._5.keys())
+
+    def key_fields(self, key) -> tuple:
+        """(taxid, species_name) output fields for an accumulator key."""
+        if isinstance(key, (int, np.integer)):
+            return int(key), self.key_names.get(int(key), "")
+        return pd.NA, key
 
     def n_reads(self, key) -> int:
         return self._n.get(key, 0)
@@ -540,7 +438,7 @@ class DamageAccumulator:
         for key in self.taxids():
             if self._n[key] < min_reads:
                 continue
-            is_int = isinstance(key, int)
+            taxid, species_name = self.key_fields(key)
             f5, f3 = self.profile(key)
             for pos in range(self.max_pos):
                 for end, frac, arr in [
@@ -551,8 +449,8 @@ class DamageAccumulator:
                     if total == 0:
                         continue
                     rows.append({
-                        "taxid":             key if is_int else pd.NA,
-                        "species_name":      ""  if is_int else key,
+                        "taxid":             taxid,
+                        "species_name":      species_name,
                         "end":               end,
                         "position":          pos,
                         "n_reads":           self._n[key],
@@ -578,7 +476,7 @@ class DamageAccumulator:
         for key in self.taxids():
             if self._n[key] < min_reads or key not in self._s5:
                 continue
-            is_int = isinstance(key, int)
+            taxid, species_name = self.key_fields(key)
             for si, (lo, hi) in enumerate(self.strata):
                 nr = int(self._sn[key][si])
                 if nr == 0:
@@ -591,8 +489,8 @@ class DamageAccumulator:
                             continue
                         unc = int(arr[pos, 1])
                         rows.append({
-                            "taxid":             key if is_int else pd.NA,
-                            "species_name":      ""  if is_int else key,
+                            "taxid":             taxid,
+                            "species_name":      species_name,
                             "stratum":           f"{lo}-{hi}",
                             "end":               end,
                             "position":          pos,
@@ -919,10 +817,10 @@ def fit_damage_models(
             continue
         if not res.get("converged", False):
             n_fail += 1
-        is_int = isinstance(key, int)
+        taxid, species_name = acc.key_fields(key)
         rows.append({
-            "taxid":        key if is_int else pd.NA,
-            "species_name": ""  if is_int else key,
+            "taxid":        taxid,
+            "species_name": species_name,
             "n_reads":      acc.n_reads(key),
             "kmer_size":    acc.kmer_size,
             **res,
@@ -968,9 +866,11 @@ def find_adaptive_plateau(
         if raw_total[p] > 0 and np.isfinite(frac[p])
     ]
     if len(valid_positions) < min_window:
-        # Expand search to all available positions
+        # Expand search to all available positions except position 0: the
+        # damage score and its p-value compare position 0 against the plateau,
+        # so a plateau containing position 0 would test it against itself.
         valid_positions = [
-            p for p in range(len(frac))
+            p for p in range(1, len(frac))
             if raw_total[p] > 0 and np.isfinite(frac[p])
         ]
     if len(valid_positions) < 2:
@@ -1053,6 +953,10 @@ def _score_with_uncertainty(
 
     if arr[0, 0] == 0:
         return {"score": np.nan, "se": np.nan, "ci_lo": np.nan, "ci_hi": np.nan, "pvalue": np.nan}
+    if plateau_start <= 0:
+        # A plateau containing position 0 would compare position 0 against a
+        # pool that includes itself; the two-proportion z-test is invalid.
+        return {"score": np.nan, "se": np.nan, "ci_lo": np.nan, "ci_hi": np.nan, "pvalue": np.nan}
 
     n0 = int(arr[0, 0])
     k0 = int(arr[0, 1])
@@ -1110,7 +1014,7 @@ def compute_damage_stats(
     for key in acc.taxids():
         if acc.n_reads(key) < min_reads:
             continue
-        is_int   = isinstance(key, int)
+        taxid, species_name = acc.key_fields(key)
         f5, f3   = acc.profile(key)
         arr5, arr3 = acc.raw(key)
         n_reads  = acc.n_reads(key)
@@ -1126,7 +1030,9 @@ def compute_damage_stats(
                     noise_factor = plateau_noise_factor,
                 )
             else:
-                ps, pe = plateau_start, plateau_end
+                # Clamp to >= 1: position 0 must stay out of the plateau pool
+                # (see _score_with_uncertainty).
+                ps, pe = max(plateau_start, 1), max(plateau_end, 1)
                 positions = [p for p in range(ps, pe + 1) if p < len(arr) and arr[p, 0] > 0]
                 n_plat = sum(arr[p, 0] for p in positions)
                 k_plat = sum(arr[p, 1] for p in positions)
@@ -1137,8 +1043,8 @@ def compute_damage_stats(
 
             pos0 = float(arr[0, 1] / arr[0, 0]) if arr[0, 0] > 0 else np.nan
             stat_rows.append({
-                "taxid":                key if is_int else pd.NA,
-                "species_name":         ""  if is_int else key,
+                "taxid":                taxid,
+                "species_name":         species_name,
                 "end":                  end,
                 "pos0_frac_unc":        pos0,
                 "plateau_frac_unc":     plateau_val,
@@ -1155,8 +1061,8 @@ def compute_damage_stats(
         s5 = end_data.get("5prime", {})
         s3 = end_data.get("3prime", {})
         global_rows.append({
-            "taxid":                key if is_int else pd.NA,
-            "species_name":         ""  if is_int else key,
+            "taxid":                taxid,
+            "species_name":         species_name,
             "n_reads":              n_reads,
             "damage_score":         s5.get("score",  np.nan),
             "damage_score_se":      s5.get("se",     np.nan),
@@ -1267,21 +1173,3 @@ def merge_damage_accumulators(
                 merged._s3[key] += dacc._s3[key]
                 merged._sn[key] += dacc._sn[key]
     return merged
-
-
-# ---------------------------------------------------------------------------
-# Misc
-# ---------------------------------------------------------------------------
-
-def normalize_counts(counts: Dict[int, float]) -> Dict[int, float]:
-    total = float(sum(counts.values()))
-    if total <= 0:
-        return {}
-    return {taxid: value / total for taxid, value in counts.items() if value > 0}
-
-
-def positive_float(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed) or parsed <= 0:
-        raise argparse.ArgumentTypeError("Value must be a positive finite number")
-    return parsed

@@ -15,6 +15,7 @@ Changes from prototype:
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -25,7 +26,6 @@ from scipy import sparse
 from scipy.optimize import minimize, nnls
 
 from kraken_screen_lib import (
-    load_sparse_matrix,
     load_sparse_matrix_for_column_slicing,
     load_sparse_vector,
     load_genus_membership_v2,
@@ -40,6 +40,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference-matrix",   required=True)
     parser.add_argument("--species-metadata",   required=True)
     parser.add_argument("--sample-vector",      required=True)
+    parser.add_argument("--sample-stats",       default="",
+                        help="Per-sample stats TSV from aggregate_sample "
+                             "--out-stats; its columns are merged into fit.tsv. "
+                             "Empty string disables.")
+    parser.add_argument("--write-fit-diagnostics", action="store_true",
+                        help="Write the large target-genus taxid/name lists to "
+                             "<out-prefix>.fit_diagnostics.tsv instead of "
+                             "dropping them")
     parser.add_argument("--reference-features", default="",
                         help="Feature index TSV; required for --restrict-to-target-genus-features.")
     parser.add_argument("--out-prefix",         required=True)
@@ -73,11 +81,15 @@ def parse_args() -> argparse.Namespace:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def load_sample_stats(sample_vector: str | Path) -> Dict[str, object]:
-    summary_path = Path(str(sample_vector).replace(".vector.npz", ".summary.tsv"))
-    if summary_path.exists():
-        return pd.read_csv(summary_path, sep="\t").iloc[0].to_dict()
-    return {}
+def load_sample_stats(stats_path: str | Path) -> Dict[str, object]:
+    """Per-sample stats row produced by aggregate_sample --out-stats."""
+    if not stats_path:
+        return {}
+    path = Path(stats_path)
+    if not path.exists():
+        print(f"WARNING: --sample-stats file not found: {path}", file=sys.stderr)
+        return {}
+    return pd.read_csv(path, sep="\t").iloc[0].to_dict()
 
 
 def load_target_genus_specs(target_genera: list[str], target_genus_files: list[str]) -> list[str]:
@@ -263,6 +275,30 @@ def resolve_target_genera(
         "target_genus_names":  ";".join(sorted(matched_names)),
         "target_genus_taxids": ";".join(str(t) for t in sorted(matched_taxids)),
     }
+
+
+# Large per-run diagnostic strings (semicolon-joined taxid/name lists, up to
+# ~0.5 MB in a single-row TSV). Kept out of fit.tsv; written separately when
+# --write-fit-diagnostics is set.
+FIT_DIAGNOSTIC_KEYS = [
+    "target_genus_feature_taxids",
+    "target_genus_names",
+    "target_genus_taxids",
+]
+
+
+def write_fit_summary(
+    out_prefix: Path,
+    summary: Dict[str, object],
+    write_diagnostics: bool,
+) -> None:
+    diagnostics = {k: summary.pop(k) for k in FIT_DIAGNOSTIC_KEYS if k in summary}
+    if write_diagnostics and diagnostics:
+        write_tsv(
+            out_prefix.with_suffix(".fit_diagnostics.tsv"),
+            pd.DataFrame([diagnostics]),
+        )
+    write_tsv(out_prefix.with_suffix(".fit.tsv"), pd.DataFrame([summary]))
 
 
 def build_genus_metadata(
@@ -598,7 +634,7 @@ def main() -> None:
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
 
     sample_vector      = load_sparse_vector(args.sample_vector)
-    sample_summary     = load_sample_stats(args.sample_vector)
+    sample_summary     = load_sample_stats(args.sample_stats)
     sample_coo         = sample_vector.tocoo()
     sample_feature_list = sample_coo.col.astype(np.int32, copy=False)
     sample_data        = sample_coo.data.astype(np.float64, copy=False)
@@ -612,11 +648,9 @@ def main() -> None:
         )
         species_df = species_df.sort_values("species_index").reset_index(drop=True)
         reference_matrix = load_sparse_matrix_for_column_slicing(args.reference_matrix)
-        reference_matrix_csr = reference_matrix.tocsr()
         species_df, target_indices, target_info = resolve_target_genera(species_df, target_genus_specs)
-        if len(target_indices) != reference_matrix_csr.shape[0]:
-            reference_matrix_csr = reference_matrix_csr[target_indices, :]
-            reference_matrix     = reference_matrix[target_indices, :]
+        if len(target_indices) != reference_matrix.shape[0]:
+            reference_matrix = reference_matrix[target_indices, :]
 
         target_ff_info: Dict[str, object] = {
             "restrict_to_target_genus_features": False,
@@ -655,7 +689,8 @@ def main() -> None:
         fit_info["fit_granularity"] = args.fit_granularity
         fit_info.update(target_ff_info)
         write_tsv(out_prefix.with_suffix(".abundance.tsv"), fit_df)
-        write_tsv(out_prefix.with_suffix(".fit.tsv"), pd.DataFrame([fit_info | target_info | sample_summary]))
+        write_fit_summary(out_prefix, fit_info | target_info | sample_summary,
+                          args.write_fit_diagnostics)
         # Always write genus.tsv (empty for species granularity)
         write_tsv(out_prefix.with_suffix(".genus.tsv"), pd.DataFrame(columns=GENUS_TSV_COLUMNS))
         return
@@ -718,7 +753,7 @@ def main() -> None:
         }
         write_tsv(out_prefix.with_suffix(".abundance.tsv"), pd.DataFrame())
         write_tsv(out_prefix.with_suffix(".genus.tsv"),     pd.DataFrame())
-        write_tsv(out_prefix.with_suffix(".fit.tsv"),       pd.DataFrame([empty_fit]))
+        write_fit_summary(out_prefix, empty_fit, args.write_fit_diagnostics)
         return
 
     if args.fit_granularity == "within-genus":
@@ -845,10 +880,16 @@ def main() -> None:
             "fit_elapsed_seconds": float(time.perf_counter() - start_time),
             **target_ff_info, **target_info, **sample_summary,
         }
-        write_tsv(out_prefix.with_suffix(".fit.tsv"), pd.DataFrame([fit_summary]))
+        write_fit_summary(out_prefix, fit_summary, args.write_fit_diagnostics)
         return
 
     # genus granularity
+    if float(args.min_genus_relative_abundance) > 0.0:
+        print(
+            "NOTE: --min-genus-relative-abundance is only enforced under "
+            "--fit-granularity within-genus; ignoring it for genus granularity.",
+            file=sys.stderr,
+        )
     genus_df, genus_reference, genus_species_indices = build_genus_metadata(species_df, species_reference_csr)
     protected_genus_rows = (
         np.flatnonzero(genus_df["genus_taxid"].astype(int).isin(guaranteed_genera).to_numpy()).astype(np.int32)
@@ -949,10 +990,11 @@ def main() -> None:
         "species_n_nonzero_total":   int(sp_nonzero_total_g),
         "species_fit_elapsed_seconds": float(sp_elapsed_total_g),
         "n_genus_fitted": int((genus_fit_df["relative_abundance"] > 0).sum()) if not genus_fit_df.empty else 0,
+        "min_genus_relative_abundance": float(args.min_genus_relative_abundance),
         "fit_elapsed_seconds": float(time.perf_counter() - start_time),
         **target_ff_info, **target_info, **sample_summary,
     }
-    write_tsv(out_prefix.with_suffix(".fit.tsv"), pd.DataFrame([fit_summary_g]))
+    write_fit_summary(out_prefix, fit_summary_g, args.write_fit_diagnostics)
 
 
 if __name__ == "__main__":

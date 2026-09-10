@@ -12,12 +12,58 @@ classification output. For each sample:
 
 Usage:
   snakemake --cores 32 --resources mem_mb=64000
-  snakemake plots --cores 32         # include damage plots
 """
 
 import sys
 from pathlib import Path
 import pandas as pd
+from snakemake.utils import validate
+
+# ---------------------------------------------------------------------------
+# Validate configuration
+# ---------------------------------------------------------------------------
+
+validate(config, "schemas/config.schema.yaml")
+
+# Cross-field constraints json-schema cannot express
+_dmg_lo = config.get("damage_min_read_length", 30)
+_dmg_hi = config.get("damage_max_read_length", 75)
+if _dmg_lo > _dmg_hi:
+    raise ValueError(
+        f"damage_min_read_length ({_dmg_lo}) > damage_max_read_length ({_dmg_hi})"
+    )
+_seen_strata = []
+for _spec in config["damage_strata"]:
+    _lo, _hi = (int(x) for x in str(_spec).split("-"))
+    if _lo > _hi:
+        raise ValueError(f"damage_strata entry '{_spec}': start > end")
+    if _lo < _dmg_lo or _hi > _dmg_hi:
+        raise ValueError(
+            f"damage_strata entry '{_spec}' lies outside the damage read-length "
+            f"window [{_dmg_lo}, {_dmg_hi}]"
+        )
+    for _plo, _phi in _seen_strata:
+        if _lo <= _phi and _plo <= _hi:
+            raise ValueError(
+                f"damage_strata entry '{_spec}' overlaps '{_plo}-{_phi}'"
+            )
+    _seen_strata.append((_lo, _hi))
+_pl_start = config.get("damage_plateau_search_start", 3)
+_pl_end   = config.get("damage_plateau_search_end", 9)
+if _pl_start > _pl_end:
+    raise ValueError(
+        f"damage_plateau_search_start ({_pl_start}) > damage_plateau_search_end ({_pl_end})"
+    )
+if _pl_end >= config["damage_max_pos"]:
+    raise ValueError(
+        f"damage_plateau_search_end ({_pl_end}) must be < damage_max_pos "
+        f"({config['damage_max_pos']})"
+    )
+if config.get("damage_min_plateau_window", 3) > _pl_end - _pl_start + 1:
+    raise ValueError(
+        f"damage_min_plateau_window ({config.get('damage_min_plateau_window', 3)}) "
+        f"exceeds the plateau search span [{_pl_start}, {_pl_end}]"
+    )
 
 # ---------------------------------------------------------------------------
 # Load sample / unit manifest
@@ -28,6 +74,7 @@ import pandas as pd
 # int64 and lose its leading zero, renaming the sample's output directory.
 units = pd.read_csv(config["units_tsv"], sep="\t", dtype=str)
 units.columns = units.columns.str.strip()
+validate(units, "schemas/units.schema.yaml")
 
 if units["unit_id"].duplicated().any():
     dups = units.loc[units["unit_id"].duplicated(keep=False), "unit_id"].tolist()
@@ -172,6 +219,7 @@ rule screen_unit:
         strata         = damage_strata_args(),
         min_read_len   = config.get("damage_min_read_length", 30),
         max_read_len   = config.get("damage_max_read_length", 75),
+        kmer_size      = config.get("kmer_size", 0),
     resources:
         mem_mb   = config["resources"]["screen_unit"]["mem_mb"],
         runtime  = config["resources"]["screen_unit"]["runtime"],
@@ -191,6 +239,7 @@ rule screen_unit:
             --strata             {params.strata:q} \
             --min-read-length    {params.min_read_len} \
             --max-read-length    {params.max_read_len} \
+            --kmer-size          {params.kmer_size} \
             > {log:q} 2>&1
         """
 
@@ -202,10 +251,13 @@ rule screen_unit:
 
 rule aggregate_sample:
     input:
-        vectors       = get_sample_vectors,
-        damage_arrays = get_sample_damage_arrays,
+        vectors        = get_sample_vectors,
+        damage_arrays  = get_sample_damage_arrays,
+        summaries      = get_sample_summaries,
+        species_taxids = config["species_taxids"],
     output:
         vector            = "results/samples/{sample_id}/{sample_id}.vector.npz",
+        stats             = "results/samples/{sample_id}/{sample_id}.unit_stats.tsv",
         damage_profile    = "results/samples/{sample_id}/{sample_id}.damage_profile.tsv",
         damage_stats      = "results/samples/{sample_id}/{sample_id}.damage_stats.tsv",
         damage_global     = "results/samples/{sample_id}/{sample_id}.damage_global.tsv",
@@ -231,7 +283,10 @@ rule aggregate_sample:
         PYTHONPATH="{SCRIPTS_DIR}" python "{SCRIPTS_DIR}/aggregate_sample.py" \
             --vectors       {input.vectors:q} \
             --damage-arrays {input.damage_arrays:q} \
+            --species-taxids {input.species_taxids:q} \
+            --unit-summaries {input.summaries:q} \
             --out-vector    {output.vector:q} \
+            --out-stats     {output.stats:q} \
             --out-damage-prefix {params.out_damage_prefix:q} \
             --min-reads     {params.min_reads} \
             {params.adaptive_flag:q} \
@@ -261,6 +316,7 @@ rule fit_abundance:
         # reads only the KrakenUniq reports and the unit summaries, so it does
         # not depend on this rule and the edge is acyclic.
         coverage         = "results/samples/{sample_id}/{sample_id}.coverage.tsv",
+        stats            = "results/samples/{sample_id}/{sample_id}.unit_stats.tsv",
     output:
         abundance = "results/samples/{sample_id}/{sample_id}.abundance.tsv",
         fit       = "results/samples/{sample_id}/{sample_id}.fit.tsv",
@@ -290,6 +346,7 @@ rule fit_abundance:
             --reference-matrix   {input.matrix:q} \
             --species-metadata   {input.species_metadata:q} \
             --sample-vector      {input.vector:q} \
+            --sample-stats       {input.stats:q} \
             --reference-features {input.features:q} \
             --genus-taxids       {input.genus_taxids:q} \
             --out-prefix         {params.out_prefix:q} \
@@ -461,7 +518,7 @@ rule aggregate_all:
 
 
 # ---------------------------------------------------------------------------
-# Rule: plot_damage (optional — triggered by rule `plots`)
+# Rule: plot_damage (optional — outputs requested by rule `all`)
 # ---------------------------------------------------------------------------
 
 rule plot_damage:

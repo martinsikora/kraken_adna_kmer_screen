@@ -13,6 +13,10 @@ Outputs (all written to --out-prefix.*):
   .summary.tsv     Build diagnostics
 
 This script is self-contained and has no dependency on kraken_screen_lib.
+A few helpers (iter_kraken_rows, save_sparse_matrix, load_species_membership_v2,
+load_seqid_to_taxid) are duplicated from kraken_screen_lib on purpose so the
+builder can be copied next to a database and run stand-alone — do not
+"deduplicate" them back into the library.
 """
 
 from __future__ import annotations

@@ -34,7 +34,7 @@ COV_COLS = [
     "sample_id", "tax_id", "tax_name", "rank",
     "reads", "kmers", "dup", "cov", "evenness_index",
 ]
-DAMAGE_STATS_COLS = ["sample_id", "species_name", "end", "plateau_frac_unc"]
+DAMAGE_STATS_COLS = ["sample_id", "taxid", "species_name", "end", "plateau_frac_unc"]
 HIT_FLAG_LABELS = [
     # damage significance AND a biologically possible damage rate; see
     # _pass_damage_criterion
@@ -50,19 +50,31 @@ SUMMARY_OUTPUT_COLS = [
     "rank", "rank_within_genus",
     "n_reads", "damage_score", "damage_score_ci95_lo", "damage_score_ci95_hi",
     "damage_pvalue", "damage_score_3prime",
+    # Per-base damage rates from the k-mer window deconvolution
+    # (damage_model.tsv), placed next to the plateau statistics: the plateau
+    # damage_score/damage_pvalue are the detection statistic (conservative
+    # lower bound), the model amplitude damage_rate_5prime is the effect-size
+    # estimate, robust to the fragment-length distribution.
+    # terminal rate = interior_rate + damage_rate_*, so it is not carried here.
+    # Only damage_rate_5prime feeds a hit criterion (as an implausibility veto).
+    "interior_rate", "damage_rate_5prime", "damage_rate_5prime_se",
+    "damage_rate_3prime", "damage_model_pvalue_5prime",
     "plateau_classified_rate",
     "evenness_index", "cov", "dup", "kmers",
-    # Per-base damage rates from the k-mer window deconvolution (damage_model.tsv).
-    # terminal rate = interior_rate + damage_rate_*, so it is not carried here.
-    # Annotations only: no hit criterion uses them.
-    "interior_rate", "damage_rate_5prime", "damage_rate_3prime",
     "hit_criteria_flag",
 ]
 
 DAMAGE_MODEL_COLS = [
-    "sample_id", "species_name",
-    "interior_rate", "damage_rate_5prime", "damage_rate_3prime",
+    "sample_id", "taxid", "species_name",
+    "interior_rate", "damage_rate_5prime", "damage_rate_5prime_se",
+    "damage_rate_3prime", "damage_model_pvalue_5prime",
 ]
+
+
+def _taxid_int64(df: pd.DataFrame, col: str) -> None:
+    """Normalize a taxid column to nullable Int64 in place (before merging)."""
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
 
 
 def parse_args() -> argparse.Namespace:
@@ -217,16 +229,20 @@ def load_damage_stats_5prime(paths: list[str]) -> pd.DataFrame:
             sdf["sample_id"] = sdf["sample_id"].astype(str)
         if not {"end", "species_name", "plateau_frac_unc"}.issubset(sdf.columns):
             continue
+        if "taxid" not in sdf.columns:
+            continue
         ends = sdf["end"].astype(str).str.lower()
-        sdf = sdf.loc[ends == "5prime", ["sample_id", "species_name", "plateau_frac_unc"]].copy()
+        sdf = sdf.loc[ends == "5prime", ["sample_id", "taxid", "plateau_frac_unc"]].copy()
         if sdf.empty:
             continue
         sdf["plateau_classified_rate"] = 1.0 - pd.to_numeric(sdf["plateau_frac_unc"], errors="coerce")
-        frames.append(sdf[["sample_id", "species_name", "plateau_classified_rate"]])
+        frames.append(sdf[["sample_id", "taxid", "plateau_classified_rate"]])
 
     if not frames:
-        return pd.DataFrame(columns=["sample_id", "species_name", "plateau_classified_rate"])
-    return pd.concat(frames, ignore_index=True)
+        return pd.DataFrame(columns=["sample_id", "taxid", "plateau_classified_rate"])
+    out = pd.concat(frames, ignore_index=True)
+    _taxid_int64(out, "taxid")
+    return out
 
 
 def _series_numeric(df: pd.DataFrame, col: str) -> pd.Series:
@@ -298,12 +314,11 @@ def load_damage_model(paths: list | None) -> pd.DataFrame:
     if not paths:
         return pd.DataFrame(columns=DAMAGE_MODEL_COLS)
     df = _load_typed_stack(list(paths), wanted_cols=DAMAGE_MODEL_COLS)
-    if df.empty:
+    if df.empty or "taxid" not in df.columns:
         return pd.DataFrame(columns=DAMAGE_MODEL_COLS)
-    if "species_name" in df.columns:
-        df["species_name"] = df["species_name"].astype(str)
-    # one row per (sample, species); the fit is already per taxon
-    return df.drop_duplicates(subset=["sample_id", "species_name"])
+    _taxid_int64(df, "taxid")
+    # one row per (sample, taxon); the fit is already per taxon
+    return df.drop_duplicates(subset=["sample_id", "taxid"])
 
 
 def build_integrated_summary(
@@ -326,47 +341,45 @@ def build_integrated_summary(
     Build one integrated sample-species table by outer-joining abundance, damage,
     and coverage evidence, then retain only rows with complete statistics.
     """
-    abd = abundance_df[[c for c in ABUNDANCE_COLS if c in abundance_df.columns]].copy() if not abundance_df.empty else pd.DataFrame(columns=["sample_id", "species_name"])
-    dmg = damage_df[[c for c in DMG_COLS if c in damage_df.columns]].copy() if not damage_df.empty else pd.DataFrame(columns=["sample_id", "species_name"])
-    if "taxid" in dmg.columns:
-        dmg = dmg.rename(columns={"taxid": "damage_taxid"})
+    # All merges key on (sample_id, species_taxid). Names differ between the
+    # KrakenUniq report and the taxonomy dump (which would silently drop rows
+    # from a name join); taxids do not. species_name is coalesced afterwards.
+    abd = abundance_df[[c for c in ABUNDANCE_COLS if c in abundance_df.columns]].copy() if not abundance_df.empty else pd.DataFrame(columns=["sample_id", "species_taxid", "species_name"])
+    _taxid_int64(abd, "species_taxid")
 
-    cov = pd.DataFrame(columns=["sample_id", "species_name"])
+    dmg = damage_df[[c for c in DMG_COLS if c in damage_df.columns]].copy() if not damage_df.empty else pd.DataFrame(columns=["sample_id", "taxid", "species_name"])
+    dmg = dmg.rename(columns={"taxid": "species_taxid",
+                              "species_name": "damage_species_name"})
+    _taxid_int64(dmg, "species_taxid")
+
+    cov = pd.DataFrame(columns=["sample_id", "species_taxid"])
     if not coverage_df.empty:
         cov = coverage_df[[c for c in COV_COLS if c in coverage_df.columns]].copy()
-        rename_map = {}
-        if "tax_id" in cov.columns:
-            rename_map["tax_id"] = "coverage_species_taxid"
-        if "tax_name" in cov.columns:
-            rename_map["tax_name"] = "species_name"
-        cov = cov.rename(columns=rename_map)
-        if "rank" in cov.columns:
-            cov = cov.rename(columns={"rank": "coverage_rank"})
+        cov = cov.rename(columns={"tax_id":   "species_taxid",
+                                  "tax_name": "coverage_species_name",
+                                  "rank":     "coverage_rank"})
+        _taxid_int64(cov, "species_taxid")
 
     if abd.empty and dmg.empty and cov.empty:
         return pd.DataFrame()
 
-    merged = abd.merge(dmg, on=["sample_id", "species_name"], how="outer")
-    merged = merged.merge(cov, on=["sample_id", "species_name"], how="outer")
+    merged = abd.merge(dmg, on=["sample_id", "species_taxid"], how="outer")
+    merged = merged.merge(cov, on=["sample_id", "species_taxid"], how="outer")
 
-    if "species_taxid" in merged.columns:
-        merged["species_taxid"] = pd.to_numeric(merged["species_taxid"], errors="coerce")
-    else:
-        merged["species_taxid"] = np.nan
-    if "damage_taxid" in merged.columns:
-        merged["species_taxid"] = merged["species_taxid"].combine_first(
-            pd.to_numeric(merged["damage_taxid"], errors="coerce")
-        )
-    if "coverage_species_taxid" in merged.columns:
-        merged["species_taxid"] = merged["species_taxid"].combine_first(
-            pd.to_numeric(merged["coverage_species_taxid"], errors="coerce")
-        )
-    merged["species_taxid"] = merged["species_taxid"].astype("Int64")
+    # species_name: abundance (taxonomy dump) -> damage -> KrakenUniq report
+    name = merged["species_name"] if "species_name" in merged.columns else pd.Series(pd.NA, index=merged.index)
+    name = name.replace("", pd.NA)
+    for fallback in ["damage_species_name", "coverage_species_name"]:
+        if fallback in merged.columns:
+            name = name.combine_first(merged[fallback].replace("", pd.NA))
+    merged["species_name"] = name
+    merged = merged.drop(columns=[c for c in ["damage_species_name", "coverage_species_name"] if c in merged.columns])
 
     if not damage_stats_5prime_df.empty:
+        stats = damage_stats_5prime_df.rename(columns={"taxid": "species_taxid"})
         merged = merged.merge(
-            damage_stats_5prime_df[["sample_id", "species_name", "plateau_classified_rate"]],
-            on=["sample_id", "species_name"],
+            stats[["sample_id", "species_taxid", "plateau_classified_rate"]],
+            on=["sample_id", "species_taxid"],
             how="left",
         )
 
@@ -374,9 +387,13 @@ def build_integrated_summary(
     # its row: the fit needs read-length strata above a minimum, so it covers
     # fewer taxa than the damage profile does.
     if damage_model_df is not None and not damage_model_df.empty:
-        cols = [c for c in DAMAGE_MODEL_COLS if c in damage_model_df.columns]
-        merged = merged.merge(damage_model_df[cols],
-                              on=["sample_id", "species_name"], how="left")
+        model = damage_model_df.rename(columns={"taxid": "species_taxid"})
+        cols = [c for c in ["sample_id", "species_taxid", "interior_rate",
+                            "damage_rate_5prime", "damage_rate_5prime_se",
+                            "damage_rate_3prime", "damage_model_pvalue_5prime"]
+                if c in model.columns]
+        merged = merged.merge(model[cols],
+                              on=["sample_id", "species_taxid"], how="left")
 
     # Keep only rows where all required evidence types are present:
     # abundance + evenness + damage + classified rate.
@@ -450,285 +467,6 @@ def build_integrated_summary(
     _taxid_as_string(merged, "genus_taxid")
     merged["hit_criteria_flag"] = merged["hit_criteria_flag"].astype("string").fillna("")
     return merged[SUMMARY_OUTPUT_COLS]
-
-
-def build_hit_table(
-    abundance_df: pd.DataFrame,
-    damage_df: pd.DataFrame,
-    damage_stats_paths: list[str],
-    coverage_df: pd.DataFrame,
-    max_damage_pvalue: float,
-    min_evenness: float,
-    min_within_genus_ra: float,
-) -> pd.DataFrame:
-    """
-    Final hit table: one row per (sample, species) passing all three criteria:
-      - damage_pvalue  < max_damage_pvalue
-      - evenness_index > min_evenness
-      - within_genus_relative_abundance >= min_within_genus_ra
-
-    Joins abundance (unfiltered), damage, and coverage (species rank) on
-    (sample_id, species_taxid / tax_id). Missing evidence on any axis is
-    treated as failing that criterion.
-    """
-    if abundance_df.empty or damage_df.empty or coverage_df.empty:
-        return pd.DataFrame()
-
-    # --- abundance ---
-    abd = abundance_df.copy()
-    if "within_genus_relative_abundance" not in abd.columns:
-        # species-granularity has no within_genus column; treat RA as proxy
-        abd["within_genus_relative_abundance"] = abd.get(
-            "relative_abundance", pd.Series(dtype=float)
-        )
-    abd = abd[abd["within_genus_relative_abundance"] >= min_within_genus_ra].copy()
-    if abd.empty:
-        return pd.DataFrame()
-
-    # --- damage: require significant pvalue ---
-    dmg = damage_df.copy()
-    if "damage_pvalue" not in dmg.columns:
-        return pd.DataFrame()
-    dmg = dmg[dmg["damage_pvalue"] < max_damage_pvalue].copy()
-    if dmg.empty:
-        return pd.DataFrame()
-
-    # --- coverage: species rank only, require sufficient evenness ---
-    cov = coverage_df[coverage_df["rank"].str.lower() == "species"].copy()
-    cov = cov[cov["evenness_index"] > min_evenness].copy()
-    if cov.empty:
-        return pd.DataFrame()
-
-    # --- join abundance × damage on (sample_id, species_name) ---
-    dmg_cols = ["sample_id", "species_name"] + [
-        c for c in ["taxid", "n_reads", "damage_score",
-                    "damage_score_ci95_lo", "damage_score_ci95_hi",
-                    "damage_pvalue", "damage_score_3prime"]
-        if c in dmg.columns
-    ]
-    merged = abd.merge(dmg[dmg_cols], on=["sample_id", "species_name"], how="inner")
-    if merged.empty:
-        return pd.DataFrame()
-
-    # resolve species_taxid from abundance; fall back to damage taxid column
-    if "taxid" in merged.columns and "species_taxid" in merged.columns:
-        merged["species_taxid"] = merged["species_taxid"].combine_first(merged.pop("taxid"))
-    elif "taxid" in merged.columns:
-        merged = merged.rename(columns={"taxid": "species_taxid"})
-
-    # --- join × coverage on (sample_id, species_taxid = tax_id) ---
-    cov_cols = ["sample_id", "tax_id"] + [
-        c for c in ["reads", "kmers", "dup", "cov", "evenness_index"]
-        if c in cov.columns
-    ]
-    merged = merged.merge(
-        cov[cov_cols].rename(columns={"tax_id": "species_taxid"}),
-        on=["sample_id", "species_taxid"],
-        how="inner",
-    )
-    if merged.empty:
-        return pd.DataFrame()
-
-    # --- join plateau_classified_rate from damage_stats (5prime end) ---
-    stats_frames = []
-    for path in damage_stats_paths:
-        try:
-            sdf = pd.read_csv(path, sep="\t", dtype={"sample_id": str})
-        except (FileNotFoundError, pd.errors.EmptyDataError):
-            continue
-        if "sample_id" not in sdf.columns:
-            sdf.insert(0, "sample_id", infer_sample_id(path))
-        else:
-            sdf["sample_id"] = sdf["sample_id"].astype(str)
-        stats_frames.append(sdf)
-
-    if stats_frames:
-        stats_df = pd.concat(stats_frames, ignore_index=True)
-        stats_5p = stats_df[stats_df["end"] == "5prime"][
-            ["sample_id", "species_name", "plateau_frac_unc"]
-        ].copy()
-        stats_5p["plateau_classified_rate"] = 1.0 - stats_5p["plateau_frac_unc"]
-        merged = merged.merge(
-            stats_5p[["sample_id", "species_name", "plateau_classified_rate"]],
-            on=["sample_id", "species_name"],
-            how="left",
-        )
-
-    # --- column order ---
-    lead_cols = [
-        "sample_id", "species_taxid", "species_name", "genus_taxid", "genus_name",
-        "relative_abundance", "within_genus_relative_abundance", "genus_relative_abundance",
-        "rank", "rank_within_genus",
-        "n_reads", "damage_score", "damage_score_ci95_lo", "damage_score_ci95_hi",
-        "damage_pvalue", "damage_score_3prime",
-        "plateau_classified_rate",
-        "evenness_index", "cov", "dup", "kmers",
-    ]
-    ordered = [c for c in lead_cols if c in merged.columns]
-    rest    = [c for c in merged.columns if c not in ordered]
-    merged  = merged[ordered + rest]
-
-    return merged.sort_values(
-        ["sample_id", "relative_abundance"], ascending=[True, False]
-    ).reset_index(drop=True)
-
-
-def build_species_table(
-    abundance_df: pd.DataFrame,
-    damage_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Outer join of per-sample abundance and damage on (sample_id, species_name).
-
-    Produces one row per (sample, species) regardless of whether the species
-    has a nonzero NNLS coefficient, damage data, or both.  Missing values are
-    left as NaN.
-    """
-    ABD_COLS = [
-        "sample_id", "species_taxid", "species_name",
-        "genus_taxid", "genus_name",
-        "nnls_coefficient", "relative_abundance", "rank",
-        "genus_relative_abundance", "within_genus_relative_abundance",
-    ]
-    DMG_COLS = [
-        "sample_id", "taxid", "species_name",
-        "n_reads", "damage_score", "damage_score_se",
-        "damage_score_ci95_lo", "damage_score_ci95_hi",
-        "damage_pvalue", "damage_score_3prime",
-    ]
-
-    abd = pd.DataFrame()
-    if not abundance_df.empty:
-        present = [c for c in ABD_COLS if c in abundance_df.columns]
-        abd = abundance_df[present].copy()
-
-    dmg = pd.DataFrame()
-    if not damage_df.empty:
-        present = [c for c in DMG_COLS if c in damage_df.columns]
-        dmg = damage_df[present].copy()
-        if "taxid" in dmg.columns and "species_taxid" not in dmg.columns:
-            dmg = dmg.rename(columns={"taxid": "species_taxid"})
-
-    if abd.empty and dmg.empty:
-        return pd.DataFrame()
-
-    if abd.empty:
-        return dmg
-    if dmg.empty:
-        return abd
-
-    merged = pd.merge(
-        abd, dmg,
-        on=["sample_id", "species_name"],
-        how="outer",
-        suffixes=("", "_dmg"),
-    )
-    # Consolidate species_taxid from both sides
-    if "species_taxid_dmg" in merged.columns:
-        merged["species_taxid"] = merged["species_taxid"].combine_first(
-            merged.pop("species_taxid_dmg")
-        )
-
-    return merged.sort_values(
-        ["sample_id", "relative_abundance"],
-        ascending=[True, False],
-        na_position="last",
-    ).reset_index(drop=True)
-
-
-def build_summary(
-    abundance_df: pd.DataFrame,
-    damage_df: pd.DataFrame,
-    coverage_df: pd.DataFrame,
-    fit_paths: list[str],
-) -> pd.DataFrame:
-    """
-    One row per sample with key metrics drawn from all result types.
-    """
-    rows: list[dict] = []
-
-    fit_lookup: dict[str, dict] = {}
-    for path in fit_paths:
-        try:
-            df = pd.read_csv(path, sep="\t", dtype={"sample_id": str})
-            if df.empty:
-                continue
-            sample_id = infer_sample_id(path)
-            fit_lookup[sample_id] = df.iloc[0].to_dict()
-        except (FileNotFoundError, pd.errors.EmptyDataError):
-            continue
-
-    all_sample_ids: set[str] = set()
-    if not abundance_df.empty and "sample_id" in abundance_df.columns:
-        all_sample_ids.update(abundance_df["sample_id"].unique().tolist())
-    if not damage_df.empty and "sample_id" in damage_df.columns:
-        all_sample_ids.update(damage_df["sample_id"].unique().tolist())
-    if not coverage_df.empty and "sample_id" in coverage_df.columns:
-        all_sample_ids.update(coverage_df["sample_id"].unique().tolist())
-    all_sample_ids.update(fit_lookup.keys())
-
-    for sample_id in sorted(all_sample_ids):
-        row: dict = {"sample_id": sample_id}
-
-        # From fit.tsv
-        fit = fit_lookup.get(sample_id, {})
-        row["n_nonzero_species"]           = fit.get("n_nonzero_species", np.nan)
-        row["residual_l2_norm"]            = fit.get("residual_l2_norm", np.nan)
-        row["total_explained_feature_mass"] = fit.get("total_explained_feature_mass", np.nan)
-        row["fit_elapsed_seconds"]         = fit.get("fit_elapsed_seconds", np.nan)
-        row["fit_granularity"]             = fit.get("fit_granularity", "")
-        row["fit_mode"]                    = fit.get("fit_mode", "")
-
-        # Top species from abundance
-        if not abundance_df.empty and "sample_id" in abundance_df.columns:
-            sp = abundance_df[abundance_df["sample_id"] == sample_id]
-            if not sp.empty and "rank" in sp.columns:
-                top = sp[sp["rank"] == 1]
-                if not top.empty:
-                    row["top_species_name"]       = top.iloc[0].get("species_name", "")
-                    row["top_species_abundance"]  = top.iloc[0].get("relative_abundance", np.nan)
-                    row["n_species_above_threshold"] = len(sp)
-                else:
-                    row["top_species_name"] = ""
-                    row["top_species_abundance"] = np.nan
-                    row["n_species_above_threshold"] = len(sp)
-            else:
-                row["top_species_name"] = ""
-                row["top_species_abundance"] = np.nan
-                row["n_species_above_threshold"] = 0
-
-        # Top damage species
-        if not damage_df.empty and "sample_id" in damage_df.columns:
-            dm = damage_df[damage_df["sample_id"] == sample_id]
-            if not dm.empty:
-                dm_sorted = dm.sort_values("damage_score", ascending=False)
-                row["top_damage_species_name"] = dm_sorted.iloc[0].get("species_name", "")
-                row["top_damage_score"]        = dm_sorted.iloc[0].get("damage_score", np.nan)
-                row["top_damage_pvalue"]       = dm_sorted.iloc[0].get("damage_pvalue", np.nan)
-                row["n_taxa_damage_profiled"]  = len(dm)
-            else:
-                row["top_damage_species_name"] = ""
-                row["top_damage_score"]        = np.nan
-                row["top_damage_pvalue"]       = np.nan
-                row["n_taxa_damage_profiled"]  = 0
-
-        # Mean evenness from coverage
-        if not coverage_df.empty and "sample_id" in coverage_df.columns:
-            cov = coverage_df[
-                (coverage_df["sample_id"] == sample_id)
-                & (coverage_df["rank"].str.lower() == "species")
-            ]
-            if not cov.empty and "evenness_index" in cov.columns:
-                valid = cov["evenness_index"].dropna()
-                row["mean_evenness_species"] = float(valid.mean()) if len(valid) > 0 else np.nan
-                row["n_species_evenness"]    = len(valid)
-            else:
-                row["mean_evenness_species"] = np.nan
-                row["n_species_evenness"]    = 0
-
-        rows.append(row)
-
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
 def main() -> None:

@@ -67,6 +67,10 @@ def parse_args() -> argparse.Namespace:
                              "been truncated, so its 3' end is a sequencing cut-off "
                              "and carries no terminal damage")
     parser.add_argument("--progress-every",     type=int, default=1_000_000)
+    parser.add_argument("--kmer-size",          type=int, default=0,
+                        help="Database k-mer size. 0 (default) infers it as the "
+                             "modal value of length - n_kmers + 1 over the first "
+                             "1000 parseable rows")
     return parser.parse_args()
 
 
@@ -84,7 +88,7 @@ def main() -> None:
     feature_taxid_set: set[int] = set(feature_lookup.keys())
 
     # Load species membership: child_taxid -> (species_taxid, species_name)
-    child_to_species, _ = load_species_membership_v2(args.species_taxids)
+    child_to_species, species_id_to_name = load_species_membership_v2(args.species_taxids)
 
     # Build exclusion set (always include 0=unclassified for damage tracking,
     # but exclude from feature vector accumulation)
@@ -93,7 +97,27 @@ def main() -> None:
 
     # Initialise accumulators
     strata = parse_strata_spec(args.strata)
-    damage_acc = DamageAccumulator(max_pos=args.max_pos, strata=strata)
+    damage_acc = DamageAccumulator(max_pos=args.max_pos, strata=strata,
+                                   kmer_size=max(args.kmer_size, 0))
+    damage_acc.key_names = species_id_to_name
+
+    # k-mer size inference state: k = length - n_kmers + 1 for any read.
+    # Collect observations over a warm-up window and take the modal value,
+    # instead of trusting whichever read happens to parse first.
+    kmer_obs: dict[int, int] = {}
+    kmer_warmup_left = 1000 if damage_acc.kmer_size == 0 else 0
+    n_length_unparseable = 0
+
+    def finalize_kmer_size() -> None:
+        if damage_acc.kmer_size == 0 and kmer_obs:
+            mode_k = max(kmer_obs.items(), key=lambda kv: (kv[1], -kv[0]))[0]
+            if len(kmer_obs) > 1:
+                print(
+                    f"[screen_unit] WARNING: inconsistent inferred k-mer sizes "
+                    f"{dict(sorted(kmer_obs.items()))}; using modal value {mode_k}",
+                    file=sys.stderr, flush=True,
+                )
+            damage_acc.kmer_size = mode_k
 
     # Feature vector accumulation
     feature_counts: dict[int, float] = {}
@@ -104,8 +128,10 @@ def main() -> None:
     total_mass = 0.0
     retained_mass = 0.0
     unclassified_mass = 0.0
-    n_species_accumulated: set[str] = set()
+    n_species_accumulated: set[int] = set()
     n_damage_reads = 0
+    n_malformed_classified_rows = 0
+    max_read_len_seen = 0
     # Summed over every classified read, not only the damage window: the
     # coverage statistics this feeds are computed from all classified reads.
     # coverage_evenness turns it into a depth estimate taken from bases
@@ -133,11 +159,17 @@ def main() -> None:
                 kmer_str, exclude_set
             )
 
-            if damage_acc.kmer_size == 0 and nk > 0:
+            if kmer_warmup_left > 0 and nk > 0:
                 try:
-                    damage_acc.kmer_size = int(length_str) - nk + 1
+                    k_obs = int(length_str) - nk + 1
                 except ValueError:
-                    pass
+                    n_length_unparseable += 1
+                else:
+                    if k_obs > 0:
+                        kmer_obs[k_obs] = kmer_obs.get(k_obs, 0) + 1
+                        kmer_warmup_left -= 1
+                        if kmer_warmup_left == 0:
+                            finalize_kmer_size()
 
             # Track all parsed k-mer mass (including excluded taxa and "A" tokens)
             total_mass += float(nk)
@@ -153,13 +185,17 @@ def main() -> None:
 
             # --- Damage path (classified reads only) ---
             if status == "C":
-                n_classified += 1
                 try:
                     taxid = int(taxid_str)
                     read_len = int(length_str)
                 except ValueError:
+                    # e.g. paired-end "75|75" length fields
+                    n_malformed_classified_rows += 1
                     continue
+                n_classified += 1
                 read_length_sum += read_len
+                if read_len > max_read_len_seen:
+                    max_read_len_seen = read_len
                 # Damage is estimated only from reads within the length window.
                 # Reads at the sequencing read-length cap are truncated molecules
                 # whose 3' end is not a molecule terminus, and pooling lanes with
@@ -169,16 +205,16 @@ def main() -> None:
                     continue
                 species_info = child_to_species.get(taxid)
                 if species_info is not None:
-                    _, species_name = species_info
+                    species_taxid, _ = species_info
                     if nk > 0:
                         n_damage_reads += 1
                         n5 = min(nk, args.max_pos)
                         head, tail = end_flags_from_runs(tids, counts, n5)
                         damage_acc.add_flags(
-                            species_name, n5, head, tail,
+                            species_taxid, n5, head, tail,
                             stratum_idx=damage_acc.stratum_index(read_len),
                         )
-                        n_species_accumulated.add(species_name)
+                        n_species_accumulated.add(species_taxid)
 
             if args.progress_every > 0 and n_rows % args.progress_every == 0:
                 elapsed = time.perf_counter() - start
@@ -187,6 +223,38 @@ def main() -> None:
                     f"classified={n_classified:,} species={len(n_species_accumulated):,}",
                     file=sys.stderr, flush=True,
                 )
+
+    finalize_kmer_size()
+
+    if damage_acc.kmer_size == 0 and n_rows > 0:
+        if n_length_unparseable > 0 and not kmer_obs:
+            print(
+                f"[screen_unit] ERROR: k-mer size could not be inferred — every "
+                f"sampled row has an unparseable length field "
+                f"({n_length_unparseable} rows, e.g. paired-end '75|75'). "
+                f"All damage statistics would be silently empty. "
+                f"Pass --kmer-size explicitly if this input is genuinely usable.",
+                file=sys.stderr, flush=True,
+            )
+            sys.exit(1)
+        print(
+            "[screen_unit] WARNING: k-mer size could not be inferred "
+            "(no rows with parseable length and k-mers); the damage model "
+            "will be skipped downstream. Pass --kmer-size to set it explicitly.",
+            file=sys.stderr, flush=True,
+        )
+
+    if n_classified > 0 and max_read_len_seen <= args.max_read_length:
+        print(
+            f"[screen_unit] WARNING: longest classified read ({max_read_len_seen}) "
+            f"does not exceed --max-read-length ({args.max_read_length}), so the "
+            f"damage read-length cap never excludes anything. This suggests the "
+            f"cap sits at or above the sequencing read length; reads at the "
+            f"sequencing cap are truncated molecules whose 3' ends contaminate "
+            f"the damage profile — set damage_max_read_length strictly below "
+            f"the sequencing read length.",
+            file=sys.stderr, flush=True,
+        )
 
     elapsed = time.perf_counter() - start
     print(
@@ -216,6 +284,8 @@ def main() -> None:
         args.out_summary,
         pd.DataFrame([{
             "rows_processed":           n_rows,
+            # Classified rows with parseable taxid and length fields; rows a
+            # malformed field excluded are counted separately below.
             "classified_rows":          n_classified,
             "total_feature_mass":       total_mass,
             "retained_feature_mass":    retained_mass,
@@ -228,6 +298,8 @@ def main() -> None:
             "damage_min_read_length":   args.min_read_length,
             "damage_max_read_length":   args.max_read_length,
             "kmer_size":                damage_acc.kmer_size,
+            "n_length_unparseable":     n_length_unparseable,
+            "n_malformed_classified_rows": n_malformed_classified_rows,
             "elapsed_seconds":          elapsed,
         }]),
     )

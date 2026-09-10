@@ -1,0 +1,27 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+description: Row schema for the sample/unit manifest (units.tsv)
+type: object
+
+required:
+  - unit_id
+  - sample_id
+  - kraken_class
+  - kraken_report
+
+properties:
+  unit_id:
+    type: string
+    minLength: 1
+    description: Globally unique identifier for this sequencing unit
+  sample_id:
+    type: string
+    minLength: 1
+    description: Sample identifier; units sharing it are merged
+  kraken_class:
+    type: string
+    minLength: 1
+    description: Path to KrakenUniq classify output (TSV, plain or .gz)
+  kraken_report:
+    type: string
+    minLength: 1
+    description: Path to KrakenUniq report TSV

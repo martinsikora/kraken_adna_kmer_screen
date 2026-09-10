@@ -15,6 +15,10 @@ Outputs written to --out-damage-prefix:
   <prefix>.damage_global.tsv
   <prefix>.damage_profile_stratified.tsv
   <prefix>.damage_model.tsv
+
+With --unit-summaries/--out-stats, additionally aggregates the per-unit
+summary TSVs into one per-sample stats row (counts summed, mean_read_length
+weighted by classified rows) for downstream use by fit_nnls.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from kraken_screen_lib import (
     compute_damage_stats,
     fit_damage_models,
     load_damage_arrays,
+    load_species_membership_v2,
     load_sparse_vector,
     merge_damage_accumulators,
     write_tsv,
@@ -51,6 +56,15 @@ def parse_args() -> argparse.Namespace:
                         help="Output merged vector npz")
     parser.add_argument("--out-damage-prefix", required=True,
                         help="Prefix for damage output TSVs")
+    parser.add_argument("--species-taxids", default="",
+                        help="Species taxonomy TSV; used to attach species "
+                             "names to the taxid-keyed damage outputs")
+    parser.add_argument("--unit-summaries", nargs="+", default=[],
+                        help="Per-unit summary.tsv files to aggregate into a "
+                             "per-sample stats row")
+    parser.add_argument("--out-stats", default="",
+                        help="Output path for the aggregated per-sample stats "
+                             "TSV (requires --unit-summaries)")
 
     # Damage scoring parameters
     parser.add_argument("--min-reads",             type=int,   default=100)
@@ -75,6 +89,69 @@ def parse_args() -> argparse.Namespace:
                         help="Strata with fewer reads than this do not contribute "
                              "to the model fit")
     return parser.parse_args()
+
+
+SUMMED_STAT_COLS = [
+    "rows_processed", "classified_rows",
+    "total_feature_mass", "retained_feature_mass", "unclassified_feature_mass",
+    "damage_reads_in_window",
+    "n_length_unparseable", "n_malformed_classified_rows",
+    "elapsed_seconds",
+]
+
+
+def aggregate_unit_stats(
+    summary_paths: list[str],
+    merged_vector_nnz: int,
+    n_species_accumulated: int,
+) -> pd.DataFrame:
+    """
+    One per-sample stats row from the per-unit summary TSVs.
+
+    Counts and masses are summed; mean_read_length is weighted by classified
+    rows; kmer_size is the first nonzero value (disagreements are warned
+    about); feature/species counts come from the merged accumulators, not the
+    per-unit values, whose supports overlap between lanes.
+    """
+    frames = [pd.read_csv(p, sep="\t") for p in summary_paths]
+    units = pd.concat(frames, ignore_index=True)
+
+    row: dict[str, object] = {"n_units": len(units)}
+    for col in SUMMED_STAT_COLS:
+        if col in units.columns:
+            row[col] = units[col].sum()
+
+    n_classified = float(units["classified_rows"].sum())
+    if "mean_read_length" in units.columns and n_classified > 0:
+        row["mean_read_length"] = float(
+            (units["mean_read_length"] * units["classified_rows"]).sum() / n_classified
+        )
+    else:
+        row["mean_read_length"] = 0.0
+
+    for col in ["damage_min_read_length", "damage_max_read_length"]:
+        if col in units.columns:
+            vals = units[col].unique()
+            if len(vals) > 1:
+                print(
+                    f"[aggregate_sample] WARNING: {col} differs between units "
+                    f"({sorted(vals)}); keeping {vals[0]}",
+                    file=sys.stderr, flush=True,
+                )
+            row[col] = vals[0]
+
+    kmer_sizes = [int(k) for k in units.get("kmer_size", pd.Series(dtype=int)) if int(k) > 0]
+    if len(set(kmer_sizes)) > 1:
+        print(
+            f"[aggregate_sample] WARNING: kmer_size differs between units "
+            f"({sorted(set(kmer_sizes))}); keeping {kmer_sizes[0]}",
+            file=sys.stderr, flush=True,
+        )
+    row["kmer_size"] = kmer_sizes[0] if kmer_sizes else 0
+
+    row["n_retained_features"]   = merged_vector_nnz
+    row["n_species_accumulated"] = n_species_accumulated
+    return pd.DataFrame([row])
 
 
 def main() -> None:
@@ -124,6 +201,9 @@ def main() -> None:
     )
     damage_accs = [load_damage_arrays(path) for path in args.damage_arrays]
     merged_damage = merge_damage_accumulators(damage_accs)
+    if args.species_taxids:
+        _, species_id_to_name = load_species_membership_v2(args.species_taxids)
+        merged_damage.key_names = species_id_to_name
 
     # --- 3. Compute damage stats ---
     stats_df, global_df = compute_damage_stats(
@@ -149,6 +229,22 @@ def main() -> None:
         )
     else:
         model_df = pd.DataFrame(columns=DAMAGE_MODEL_COLUMNS)
+
+    # --- Aggregated per-sample stats from the unit summaries ---
+    if args.out_stats:
+        if not args.unit_summaries:
+            print(
+                "[aggregate_sample] ERROR: --out-stats requires --unit-summaries",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        stats_row = aggregate_unit_stats(
+            args.unit_summaries,
+            merged_vector_nnz     = int(merged_vector.nnz),
+            n_species_accumulated = len(merged_damage.taxids()),
+        )
+        Path(args.out_stats).parent.mkdir(parents=True, exist_ok=True)
+        write_tsv(args.out_stats, stats_row)
 
     prefix = args.out_damage_prefix
     write_tsv(f"{prefix}.damage_profile.tsv",            profile_df)

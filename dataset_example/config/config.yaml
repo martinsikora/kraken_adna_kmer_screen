@@ -29,6 +29,13 @@ units_tsv: config/units.tsv
 # Defaults: 0=unclassified, 1=root, 2=Bacteria domain, 131567=cellular organisms
 exclude_taxids: [0, 1, 2, 131567]
 
+# Database k-mer size, used by the damage bookkeeping to convert k-mer
+# positions to read positions. 0 (the default) infers it as the modal value of
+# length - n_kmers + 1 over the first 1000 parseable rows of the classify file,
+# and warns if the inferred values are inconsistent. Set it explicitly only if
+# that inference is unreliable for your database.
+kmer_size: 0
+
 # ---------------------------------------------------------------------------
 # NNLS abundance fitting
 # ---------------------------------------------------------------------------
