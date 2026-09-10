@@ -188,6 +188,20 @@ properties:
     default: 0.5
 
   # --- resources ---
+  screen_unit_runtime_min_per_gb:
+    type: number
+    exclusiveMinimum: 0
+    default: 60
+    description: >-
+      Minutes of SLURM walltime requested per GB of gzipped classify input for
+      screen_unit, including contention headroom. The request is clamped to
+      [screen_unit_runtime_floor, resources.screen_unit.runtime].
+  screen_unit_runtime_floor:
+    type: integer
+    minimum: 1
+    default: 30
+    description: Lower bound on the scaled screen_unit walltime request.
+
   resources:
     type: object
     required:

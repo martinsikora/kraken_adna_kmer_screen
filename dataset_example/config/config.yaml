@@ -211,6 +211,22 @@ hit_max_dup_shallow:       6.0           # shallow regime: max k-mer duplication
 hit_min_cov_deep:          0.02          # deep regime: min breadth of coverage
 hit_min_evenness:          0.5           # legacy mode, and fallback when dup/cov absent
 
+# screen_unit walltime is scaled per unit from the size of its gzipped classify
+# file rather than requested flat, because SLURM cannot backfill a worst-case
+# reservation into a short gap: on a dataset whose median unit runs a few
+# minutes, a flat request reserves orders of magnitude more walltime than is
+# used and the small jobs queue as if they were the largest.
+#
+# The figure below is minutes per GB of gzipped classify input and must already
+# include contention headroom: ~85k reads/s on an idle node at ~16 gzipped
+# bytes/read is ~13 min/GB, and the README's 4x slowdown on a busy shared node
+# puts the safe figure near 60. The estimate is clamped below by
+# screen_unit_runtime_floor and above by resources.screen_unit.runtime, which
+# remains the worst-case ceiling; retries multiply it by the attempt number, so
+# an underestimate self-heals instead of failing the run.
+screen_unit_runtime_min_per_gb: 60
+screen_unit_runtime_floor:      30
+
 # ---------------------------------------------------------------------------
 # Compute resources (mem_mb: MB RAM; runtime: minutes)
 # Adjust for your cluster / scheduler.

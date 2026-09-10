@@ -14,6 +14,8 @@ Usage:
   snakemake --cores 32 --resources mem_mb=64000
 """
 
+import math
+import os
 import sys
 from pathlib import Path
 import pandas as pd
@@ -94,6 +96,42 @@ SCRIPTS_DIR = str(Path(workflow.basedir).parent / "scripts")
 
 def get_unit_class(wildcards):
     return UNIT_INFO.loc[wildcards.unit_id, "kraken_class"]
+
+def screen_unit_runtime(input, attempt):
+    """Per-unit SLURM walltime, scaled from the classify file size.
+
+    screen_unit is one streaming pass, so its runtime is linear in the number
+    of reads and the gzipped classify file is a good proxy for that. Asking for
+    the worst-case walltime on every unit is what a flat
+    resources.screen_unit.runtime does, and it is expensive under SLURM: the
+    scheduler cannot backfill a 15 h reservation into a short gap, so a 4 min
+    job queues as if it were the largest one in the dataset. On a 846-unit
+    dataset whose median unit runs ~4 min, the flat request reserved ~88x the
+    walltime actually used.
+
+    screen_unit_runtime_min_per_gb is minutes per GB of gzipped classify input
+    and must already include contention headroom: throughput measured here is
+    ~85k reads/s on an idle node at ~16 gzipped bytes/read (= ~13 min/GB), and
+    the README's 4x slowdown on a busy shared node puts the safe figure near
+    60 min/GB.
+
+    The estimate is clamped below by screen_unit_runtime_floor (scheduling
+    granularity; nothing is gained by asking for 2 minutes) and above by
+    resources.screen_unit.runtime, which stays the worst-case ceiling. Retries
+    multiply the estimate by the attempt number, so a unit that outruns its
+    estimate self-heals on the next attempt rather than failing the workflow.
+    """
+    cap = config["resources"]["screen_unit"]["runtime"]
+    floor = config.get("screen_unit_runtime_floor", 30)
+    per_gb = config.get("screen_unit_runtime_min_per_gb", 60)
+    try:
+        size_gb = os.path.getsize(input.kraken_class) / 1e9
+    except OSError:
+        # Input not visible yet (e.g. a dry run against a remote path):
+        # fall back to the worst case rather than under-requesting.
+        return cap
+    est = max(floor, math.ceil(size_gb * per_gb))
+    return int(min(cap, est * attempt))
 
 def get_unit_reports(wildcards):
     """All kraken_report paths for a sample."""
@@ -222,7 +260,7 @@ rule screen_unit:
         kmer_size      = config.get("kmer_size", 0),
     resources:
         mem_mb   = config["resources"]["screen_unit"]["mem_mb"],
-        runtime  = config["resources"]["screen_unit"]["runtime"],
+        runtime  = lambda wildcards, input, attempt: screen_unit_runtime(input, attempt),
     log:
         "logs/units/{sample_id}/{unit_id}.screen_unit.log"
     shell:

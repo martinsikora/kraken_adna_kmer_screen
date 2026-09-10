@@ -406,12 +406,32 @@ damage, and classified-rate statistics are all available for that sample/species
 
 | Parameter | Description |
 |---|---|
-| `resources.screen_unit` | Memory/runtime for per-unit vectorization |
+| `resources.screen_unit` | Memory for per-unit vectorization; its `runtime` is the worst-case **ceiling**, not the per-job request (see below) |
 | `resources.aggregate_sample` | Memory/runtime for per-sample aggregation |
 | `resources.fit_abundance` | Memory/runtime for NNLS fitting |
 | `resources.coverage_evenness` | Memory/runtime for evenness parsing |
 | `resources.aggregate_all` | Memory/runtime for cross-sample summary |
 | `resources.plot_damage` | Memory/runtime for per-sample PDF plotting |
+| `screen_unit_runtime_min_per_gb` | `60` | Minutes of walltime requested per GB of gzipped classify input |
+| `screen_unit_runtime_floor` | `30` | Lower bound on that scaled request |
+
+#### Why `screen_unit` walltime is scaled, not flat
+
+`screen_unit` is one streaming pass, so its runtime is linear in reads and the
+gzipped classify file size is a good proxy. Requesting the worst case on every
+unit is expensive under SLURM: the scheduler cannot backfill a 15 h reservation
+into a short gap, so a 4 min job queues as though it were the largest unit in
+the dataset. On an 846-unit dataset whose median unit runs ~4 min, a flat 900
+reserved ~761,000 core-minutes against ~8,600 actually used — about 88x.
+
+Each job instead requests
+`clamp(screen_unit_runtime_floor, size_GB * screen_unit_runtime_min_per_gb,
+resources.screen_unit.runtime)`, multiplied by the attempt number on retries so
+an underestimate self-heals rather than failing the workflow. `min_per_gb` must
+include contention headroom: ~85k reads/s on an idle node at ~16 gzipped
+bytes/read is ~13 min/GB, and the 4x busy-node slowdown puts the safe figure
+near 60. The largest unit still lands just under the ceiling, so
+`resources.screen_unit.runtime` keeps doing its job as the worst-case bound.
 
 ---
 
