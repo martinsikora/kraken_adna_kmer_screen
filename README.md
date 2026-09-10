@@ -134,11 +134,11 @@ be repeated when the database changes.
 
 ```bash
 python scripts/build_reference_matrix.py \
-    --db-tsv        /path/to/krakendb/database.kraken.tsv \
-    --seqid-map     /path/to/krakendb/seqid2taxid.map \
-    --species-taxids inputs/species.tax_ids.tsv.gz \
-    --out-prefix    /path/to/krakendb/kraken_adna_kmer_screen_db/reference \
-    --exclude-taxids 0 1 2 131567
+    --database-tsv   /path/to/krakendb/database.kraken.tsv \
+    --seqid-map      /path/to/krakendb/seqid2taxid.map \
+    --species-taxids /path/to/krakendb/taxonomy/species.tax_ids.tsv.gz \
+    --out-prefix     /path/to/krakendb/kraken_adna_kmer_screen_db/reference \
+    --exclude-taxid 0 --exclude-taxid 1 --exclude-taxid 2 --exclude-taxid 131567
 ```
 
 This writes five files to the `--out-prefix` directory:
@@ -267,7 +267,7 @@ Key parameters:
 | `fit_constraint` | `nnls` | `nnls` or `simplex` |
 | `max_candidates` | `1024` | Max candidate species per genus (fast mode) |
 | `max_feature_support` | `0` | Drop features present in more than this many species (`0` disables filter) |
-| `min_genus_relative_abundance` | `0.0` | Minimum genus abundance before within-genus fit |
+| `min_genus_relative_abundance` | `0.0` | Minimum genus abundance before the species re-fit; only enforced under `fit_granularity: within-genus` (ignored for `genus` and `species`) |
 | `target_genus` | `[]` | Inline list of genus names/taxids to fit |
 | `restrict_to_target_genus_features` | `false` | Drop features outside target genera |
 | `shortlist_guarantee` | `true` | Exempt well-covered taxa from the fast-mode shortlist |
@@ -319,6 +319,7 @@ Set `shortlist_guarantee: false` to restore the previous behaviour exactly.
 
 | Parameter | Default | Description |
 |---|---|---|
+| `kmer_size` | `0` | Database k-mer size for damage-model bookkeeping; `0` infers it as the modal `length − n_kmers + 1` over the first 1000 parseable classify rows |
 | `damage_min_read_length` | `30` | Reads shorter than this are excluded from damage estimation |
 | `damage_max_read_length` | `75` | Reads longer than this are excluded (see below) |
 | `damage_max_pos` | `10` | Positions from read end to profile |
@@ -327,7 +328,7 @@ Set `shortlist_guarantee: false` to restore the previous behaviour exactly.
 | `damage_plateau_search_start` | `3` | Plateau search window start (positions from end) |
 | `damage_plateau_search_end` | `9` | Plateau search window end (must be < `damage_max_pos`) |
 | `damage_strata` | `["30-55","56-75"]` | Read-length strata for the damage profile, inside the damage length window |
-| `damage_plot_required_hit_flags` | `["damage_pvalue","within_genus_relative_abundance","classified_rate"]` | Required hit tokens for selecting taxa in damage plots |
+| `damage_plot_required_hit_flags` | `["damage_rate","within_genus_relative_abundance","classified_rate"]` | Required hit tokens for selecting taxa in damage plots. Valid tokens are the four emitted in `hit_criteria_flag`: `damage_rate`, `evenness_index`, `within_genus_relative_abundance`, `classified_rate` |
 | `damage_plot_max_keys` | `200` | Max taxa/pages per damage plot PDF |
 
 #### Read-length window for damage
@@ -396,7 +397,7 @@ Set `hit_evenness_mode: legacy` to restore the previous single-threshold
 behaviour (`evenness_index` > `hit_min_evenness`).
 
 When all four criteria pass, `hit_criteria_flag` is:
-`damage_pvalue;evenness_index;within_genus_relative_abundance;classified_rate`.
+`damage_rate;evenness_index;within_genus_relative_abundance;classified_rate`.
 
 Rows are included in `all_samples.summary.tsv.gz` only when abundance, evenness,
 damage, and classified-rate statistics are all available for that sample/species.
@@ -450,7 +451,8 @@ The integrated summary table and per-sample damage PDFs are built by the default
 |---|---|
 | `{sample_id}.abundance.tsv` | Per-species NNLS results and relative abundances |
 | `{sample_id}.genus.tsv` | Per-genus aggregated abundances |
-| `{sample_id}.fit.tsv` | NNLS fit diagnostics |
+| `{sample_id}.fit.tsv` | NNLS fit diagnostics, incl. aggregated per-unit processing stats (`rows_processed`, `mean_read_length`, `kmer_size`, …). The large semicolon-joined `target_genus_*` lists are no longer emitted here; pass `--write-fit-diagnostics` to `fit_nnls.py` to get them as `{sample_id}.fit_diagnostics.tsv` |
+| `{sample_id}.unit_stats.tsv` | Aggregated per-unit processing stats for the sample (counts summed across lanes, read-length weighted means) |
 | `{sample_id}.damage_global.tsv` | Per-species damage scores (summary) |
 | `{sample_id}.damage_stats.tsv` | Per-species per-end damage statistics and plateau estimates |
 | `{sample_id}.damage_profile.tsv` | Per-species absolute-position damage profiles |
@@ -486,7 +488,7 @@ The integrated summary table and per-sample damage PDFs are built by the default
 | `cov` | Breadth of k-mer coverage (fraction of genome represented) |
 | `dup` | Mean k-mer depth (total k-mers / unique k-mers) |
 | `interior_rate` | Per-base mismatch floor from the damage model (see below) |
-| `damage_rate_5prime` / `_3prime` | Per-base terminal damage rate, above that floor |
+| `damage_rate_5prime` / `_3prime` | Per-base terminal damage rate, above that floor. `damage_rate_5prime` is the recommended effect-size estimate; `damage_rate_5prime_se` and `damage_model_pvalue_5prime` are carried alongside (the model p-value is diagnostic only — never a detection statistic) |
 | `hit_criteria_flag` | Semicolon-delimited passing criteria tokens from: `damage_rate`, `evenness_index`, `within_genus_relative_abundance`, `classified_rate` |
 
 `damage_rate` combines two tests: `damage_pvalue < hit_max_damage_pvalue` **and**
@@ -591,6 +593,13 @@ does, and collapses to zero exactly where the signal is strongest. Use
 `damage_pvalue` for significance and hit criteria, which is what the workflow
 does.
 
+**Which number to report.** Use the plateau `damage_score` / `damage_pvalue` as
+the *detection* statistic (it is a conservative lower bound — see the k-mer
+window-centring section below), and the model amplitude `damage_rate_5prime`
+(with `damage_rate_5prime_se`) as the *effect-size* estimate: unlike the
+plateau score it is robust to the sample's fragment-length distribution. Both
+now sit side by side in `all_samples.summary.tsv.gz`.
+
 **The rate estimates are the deliverable.** `damage_rate_5prime` / `_3prime` and
 `interior_rate` are stable where `damage_score` is not: on synthetic controls
 they move ≈10% across stratum and `damage_max_pos` choices that move
@@ -609,6 +618,16 @@ taxa under `damage_min_reads` never enter the summary at all, since a
 `kmers`, `cov` and abundance rather than damage significance — but note that at
 ~100 reads `kmers` is only 2–4x the read count, so it measures how much evidence
 there is, not how evenly it is spread.
+
+**Ambiguous k-mers count as unclassified (decision record).** The parser folds
+`A:` runs (k-mers containing ambiguous bases) into taxid 0, so they enter the
+damage numerator as if unmatched. Measured with
+`scripts/diag_ambiguous_kmers.py` on dev_test (106772T full unit; 018345
+2M-read subsample): ambiguous k-mers are ≤ 0.03% of terminal k-mers and
+≤ 0.1% of the position-0 damage numerator, mildly enriched in the first 1–2
+positions and absent beyond position 5. Three orders of magnitude below real
+damage signals, so the fold-in stays; re-run the diagnostic if a platform with
+much higher N rates is introduced.
 
 ---
 
@@ -731,6 +750,38 @@ where `cov` is the fraction of the reference genome covered by at least one uniq
 k-mer (breadth), and `dup` is the mean depth of covered positions. `E ≈ 1` indicates
 coverage consistent with uniform (Poisson) read placement; `E < 1` indicates reads are
 clumped relative to expectation.
+
+---
+
+## Migration notes (2026-08 refactor)
+
+Output-format changes relative to earlier runs:
+
+- **Damage outputs are taxid-keyed.** The damage accumulator is keyed by
+  `species_taxid` (previously species name); every `damage_*.tsv` now
+  populates the `taxid` column, and all merges in
+  `aggregate_all.py`/`summarize_sample` join on `(sample_id, species_taxid)`
+  instead of name strings. **Do not mix `damage_arrays.npz` files from
+  before/after this change in one `aggregate_sample` run** — the keys differ
+  (name vs int) and the same taxon would be double-counted. The workflow's
+  code-change rerun triggers regenerate the per-unit files automatically;
+  only hand-driven script use is at risk.
+- **`fit.tsv`** no longer carries `target_genus_feature_taxids`,
+  `target_genus_names`, `target_genus_taxids` (up to ~0.5 MB of diagnostic
+  strings per sample); pass `--write-fit-diagnostics` to `fit_nnls.py` to get
+  them in a separate `.fit_diagnostics.tsv`. It instead gains the aggregated
+  per-unit processing stats (`rows_processed`, `mean_read_length`,
+  `kmer_size`, …) via the new `{sample}.unit_stats.tsv` produced by
+  `aggregate_sample`.
+- **`all_samples.summary.tsv.gz`** gains `damage_rate_5prime_se` and
+  `damage_model_pvalue_5prime`, and the model-rate columns moved next to the
+  plateau statistics. Consumers selecting columns by name are unaffected.
+- **Unit summaries** gain `n_length_unparseable` and
+  `n_malformed_classified_rows`; `classified_rows` now counts only rows with
+  parseable taxid/length fields.
+- Config and `units.tsv` are validated against `workflow/schemas/*.yaml` at
+  startup; previously silent misconfigurations (strata outside the read-length
+  window, plateau search window vs `damage_max_pos`) now fail with messages.
 
 ---
 
