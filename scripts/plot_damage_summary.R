@@ -73,7 +73,22 @@ stats <- suppressWarnings(readr::read_tsv(args$stats, col_types = readr::cols(
 ), progress = FALSE))
 
 df <- stats %>%
-  filter(.data$end == "5prime", .data$n_reads >= args$min_reads) %>%
+  filter(.data$end == "5prime", .data$n_reads >= args$min_reads)
+
+# The mutate below needs numeric columns. When the stats file has no rows --
+# no taxon in the sample reached damage_min_reads -- read_tsv types every
+# column as character and `1 - plateau_frac_unc` aborts before the nrow()
+# guard further down can fire, so the emptiness check has to happen here.
+if (nrow(df) == 0L) {
+  write_empty_plot(
+    args$output,
+    "No damage-summary points available",
+    "No taxa passed plotting filters (end=5prime and min-reads threshold)."
+  )
+  quit(save = "no", status = 0)
+}
+
+df <- df %>%
   mutate(
     x           = 1 - .data$plateau_frac_unc,
     y           = pmax(.data$damage_score, 0) * 100,
