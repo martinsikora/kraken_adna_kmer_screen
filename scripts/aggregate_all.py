@@ -32,7 +32,13 @@ DMG_COLS = [
 ]
 COV_COLS = [
     "sample_id", "tax_id", "tax_name", "rank",
-    "reads", "kmers", "dup", "cov", "evenness_index",
+    "reads", "tax_reads", "kmers", "dup", "cov", "evenness_index",
+    # Carried for the leads table only; the summary does not use them.
+    # kmer_set_ratio is the reference k-mer set size over a single genome's
+    # worth, so it says how far `cov` is from "fraction of one genome
+    # covered": >>1 deflates cov (HBV sits near 400 with ~10k database
+    # sequences), <<1 inflates it (a partial reference).
+    "genome_length", "depth_estimate", "evenness_depth", "kmer_set_ratio",
 ]
 DAMAGE_STATS_COLS = ["sample_id", "taxid", "species_name", "end", "plateau_frac_unc"]
 HIT_FLAG_LABELS = [
@@ -95,6 +101,10 @@ def parse_args() -> argparse.Namespace:
                              "annotations; omitted columns are written as NaN")
     parser.add_argument("--out-dir",     required=True,
                         help="Output directory for summary TSVs")
+    parser.add_argument("--abundance-only-min-within-genus-ra", type=float, default=0.1,
+                        help="Keep abundance-only rows (below evenness_min_reads, so "
+                             "absent from coverage.tsv) at or above this within-genus "
+                             "relative abundance. Default 0.1")
     parser.add_argument("--out-file",    default=None,
                         help="Write the summary to this exact path instead of "
                              "<out-dir>/all_samples.summary.tsv.gz. Every column "
@@ -469,6 +479,92 @@ def build_integrated_summary(
     return merged[SUMMARY_OUTPUT_COLS]
 
 
+LEADS_EXTRA_COLS = [
+    "evidence", "reads", "tax_reads", "genome_length", "depth_estimate",
+    "evenness_depth", "kmer_set_ratio",
+]
+
+
+def build_leads_table(
+    summary_df: pd.DataFrame,
+    abundance_df: pd.DataFrame,
+    coverage_df: pd.DataFrame,
+    min_within_genus_ra: float,
+) -> pd.DataFrame:
+    """Superset of the integrated summary, with damage left-joined.
+
+    The summary requires abundance, evenness, damage and classified-rate
+    statistics all to be present, so a taxon below damage_min_reads (counted
+    *after* the damage read-length window) vanishes from it entirely even when
+    its coverage and abundance are informative. On a 742-sample screen that
+    hid, among others, four Hepatitis B samples covering roughly a third of the
+    genome at a duplication rate near 2, and four of the seven Yersinia pestis
+    samples that a targeted mapping workflow recovered.
+
+    Rows are labelled by what supports them, and the summary is exactly the
+    `evidence == "full"` subset:
+
+      full           abundance + coverage + damage (a detection)
+      coverage_only  no damage profile: too few reads in the length window
+      abundance_only below evenness_min_reads, so not even in coverage.tsv;
+                     kept only above min_within_genus_ra, since without reads
+                     or k-mers the within-genus share is the only signal
+
+    Rows that are not `full` carry NO damage evidence. They are leads for
+    targeted follow-up, never authenticated detections, and must not be
+    counted alongside hits.
+    """
+    cov = coverage_df.rename(columns={"tax_id": "species_taxid", "tax_name": "species_name"}).copy()
+    cov = cov.drop(columns=[c for c in ("rank",) if c in cov.columns])
+    abu_keys = [c for c in ABUNDANCE_COLS if c not in ("species_name",)]
+    abu_all = abundance_df.copy()
+    # build_integrated_summary normalizes taxids to strings, so every frame that
+    # takes part in these joins has to agree on that: merging int64 against
+    # string keys is a hard error in pandas, not a silent miss.
+    for frame in (cov, abu_all):
+        _taxid_as_string(frame, "species_taxid")
+        frame["sample_id"] = frame["sample_id"].astype(str)
+    abu = abu_all[[c for c in abu_keys if c in abu_all.columns]]
+
+    base = cov.merge(abu, on=["sample_id", "species_taxid"], how="left")
+
+    # Abundance-only rows: present in the fit but below evenness_min_reads.
+    seen = set(zip(cov["sample_id"], cov["species_taxid"]))
+    abu_only = abu_all[
+        [(s, t) not in seen for s, t in zip(abu_all["sample_id"], abu_all["species_taxid"])]
+    ]
+    if "within_genus_relative_abundance" in abu_only.columns:
+        abu_only = abu_only[
+            pd.to_numeric(abu_only["within_genus_relative_abundance"], errors="coerce")
+            >= min_within_genus_ra
+        ]
+    leads = pd.concat([base, abu_only], ignore_index=True)
+
+    dmg_cols = [c for c in SUMMARY_OUTPUT_COLS if c not in cov.columns and c not in abu.columns]
+    dmg = summary_df[["sample_id", "species_taxid"] + [c for c in dmg_cols if c in summary_df.columns]].copy()
+    _taxid_as_string(dmg, "species_taxid")
+    dmg["sample_id"] = dmg["sample_id"].astype(str)
+    leads["sample_id"] = leads["sample_id"].astype(str)
+    _taxid_as_string(leads, "species_taxid")
+    leads = leads.merge(dmg, on=["sample_id", "species_taxid"], how="left", suffixes=("", "_dup"))
+    leads = leads.drop(columns=[c for c in leads.columns if c.endswith("_dup")])
+
+    has_damage = leads["damage_pvalue"].notna() if "damage_pvalue" in leads.columns else False
+    has_cov = leads["kmers"].notna() if "kmers" in leads.columns else False
+    leads["evidence"] = np.where(has_damage, "full", np.where(has_cov, "coverage_only", "abundance_only"))
+
+    # Concatenating the abundance-only rows promotes any int column that gains a
+    # NaN to float, which would write genus_taxid as "6.0" and break string joins
+    # on it. Normalize the taxid columns the way the summary does.
+    for col in ("species_taxid", "genus_taxid"):
+        _taxid_as_string(leads, col)
+
+    ordered = [c for c in SUMMARY_OUTPUT_COLS if c in leads.columns]
+    ordered = ordered[:3] + ["evidence"] + [c for c in ordered[3:]]
+    ordered += [c for c in LEADS_EXTRA_COLS if c in leads.columns and c not in ordered]
+    return leads[[c for c in ordered if c in leads.columns]]
+
+
 def main() -> None:
     args = parse_args()
     out_dir = Path(args.out_dir)
@@ -495,10 +591,18 @@ def main() -> None:
         hit_max_dup_shallow=args.hit_max_dup_shallow,
         hit_min_cov_deep=args.hit_min_cov_deep,
     )
+    # The written table is the superset: `summary_df` is exactly its
+    # `evidence == "full"` subset, so nothing is lost by not writing it too.
+    out_df = build_leads_table(
+        summary_df=summary_df,
+        abundance_df=abundance_df_all,
+        coverage_df=coverage_df,
+        min_within_genus_ra=args.abundance_only_min_within_genus_ra,
+    )
     out_path = Path(args.out_file) if args.out_file else out_dir / "all_samples.summary.tsv.gz"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_out_path = out_path.with_suffix(out_path.suffix + ".tmp")
-    summary_df.to_csv(tmp_out_path, sep="\t", index=False, compression="gzip")
+    out_df.to_csv(tmp_out_path, sep="\t", index=False, compression="gzip")
     tmp_out_path.replace(out_path)
 
     n_hits = (
@@ -506,8 +610,12 @@ def main() -> None:
         if not summary_df.empty
         else 0
     )
+    tiers = out_df["evidence"].value_counts().to_dict()
     print(
-        f"[aggregate_all] rows={len(summary_df)} "
+        f"[aggregate_all] rows={len(out_df)} "
+        f"full={tiers.get('full', 0)} "
+        f"coverage_only={tiers.get('coverage_only', 0)} "
+        f"abundance_only={tiers.get('abundance_only', 0)} "
         f"samples={summary_df['sample_id'].nunique() if 'sample_id' in summary_df.columns and not summary_df.empty else 0} "
         f"hits_pass_all={n_hits} "
         f"output={out_path}",

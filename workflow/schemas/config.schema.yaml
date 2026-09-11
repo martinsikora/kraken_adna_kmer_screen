@@ -187,6 +187,17 @@ properties:
     maximum: 1
     default: 0.5
 
+  abundance_only_min_within_genus_ra:
+    type: number
+    minimum: 0
+    maximum: 1
+    default: 0.1
+    description: >-
+      Minimum within-genus relative abundance for an abundance-only row to be
+      kept in all_samples.summary.tsv.gz. Such rows sit below evenness_min_reads
+      and so carry neither k-mer counts nor damage; the within-genus share is
+      the only signal they have.
+
   # --- resources ---
   screen_unit_runtime_min_per_gb:
     type: number

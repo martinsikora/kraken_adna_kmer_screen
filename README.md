@@ -330,6 +330,7 @@ Set `shortlist_guarantee: false` to restore the previous behaviour exactly.
 | `damage_strata` | `["30-55","56-75"]` | Read-length strata for the damage profile, inside the damage length window |
 | `damage_plot_required_hit_flags` | `["damage_rate","within_genus_relative_abundance","classified_rate"]` | Required hit tokens for selecting taxa in damage plots. Valid tokens are the four emitted in `hit_criteria_flag`: `damage_rate`, `evenness_index`, `within_genus_relative_abundance`, `classified_rate` |
 | `damage_plot_max_keys` | `200` | Max taxa/pages per damage plot PDF |
+| `abundance_only_min_within_genus_ra` | `0.1` | Minimum within-genus abundance for an abundance-only row to be kept |
 
 #### Read-length window for damage
 
@@ -399,8 +400,34 @@ behaviour (`evenness_index` > `hit_min_evenness`).
 When all four criteria pass, `hit_criteria_flag` is:
 `damage_rate;evenness_index;within_genus_relative_abundance;classified_rate`.
 
-Rows are included in `all_samples.summary.tsv.gz` only when abundance, evenness,
-damage, and classified-rate statistics are all available for that sample/species.
+#### Evidence tiers: not every row is a detection
+
+That requirement is stricter than it looks. Damage is estimated only from reads
+inside the damage read-length window, so the effective floor is
+`damage_min_reads` divided by the fraction of reads in that window — on a
+dataset with 44% of reads in a 30-75 bp window, 70 becomes ~160 reads. A taxon
+below it disappears from the summary even when its coverage and abundance are
+informative.
+
+`all_samples.summary.tsv.gz` therefore left-joins damage rather than requiring
+it, and labels every row with what supports it:
+
+| `evidence` | Meaning |
+|---|---|
+| `full` | abundance + coverage + damage — a detection. **Filter to this to reproduce the pre-2026-09 table exactly** |
+| `coverage_only` | too few in-window reads for a damage profile |
+| `abundance_only` | below `evenness_min_reads`, so absent from `coverage.tsv`; kept above `leads_min_within_genus_ra` |
+
+It also carries `reads`, `tax_reads`, `genome_length`, `depth_estimate`,
+`evenness_depth` and `kmer_set_ratio`, which earlier versions omitted. `kmer_set_ratio` matters when reading
+`cov`: it is the reference k-mer set size over one genome's worth, so a value
+far above 1 means `cov` is diluted across many database sequences (Hepatitis B
+sits near 400 with ~10,000 sequences under its taxid, making `hit_min_cov_deep`
+unreachable), and far below 1 means `cov` is inflated by a partial reference.
+
+**Rows that are not `full` carry no damage evidence.** They are leads for
+targeted follow-up, not authenticated detections, and must never be counted
+alongside hits.
 
 ### Compute resources
 
@@ -487,7 +514,7 @@ The integrated summary table and per-sample damage PDFs are built by the default
 
 | File | Description |
 |---|---|
-| `all_samples.summary.tsv.gz` | Single integrated sample-species table with abundance, damage, coverage, and hit-criterion tokens |
+| `all_samples.summary.tsv.gz` | Single integrated sample-species table with abundance, damage, coverage, hit-criterion tokens and an `evidence` tier per row |
 
 ### Key output columns
 
@@ -802,6 +829,14 @@ Output-format changes relative to earlier runs:
 - Config and `units.tsv` are validated against `workflow/schemas/*.yaml` at
   startup; previously silent misconfigurations (strata outside the read-length
   window, plateau search window vs `damage_max_pos`) now fail with messages.
+- **`all_samples.summary.tsv.gz` is now a superset of the old table.** Damage is
+  left-joined instead of required, so rows appear for taxa that have coverage
+  and/or abundance but too few in-window reads for a damage profile. The new
+  `evidence` column marks them, and `evidence == "full"` reproduces the previous
+  contents value for value. Analyses keyed on `hit_criteria_flag` are unaffected
+  (it is null outside `full`); anything that counted rows, or assumed every row
+  carries damage, must now filter on `evidence`. The table grows by roughly 70%
+  (2.5M to 4.4M rows on a 742-sample screen).
 
 ---
 

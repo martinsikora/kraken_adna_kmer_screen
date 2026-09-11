@@ -519,6 +519,7 @@ rule aggregate_all:
         summary   = "results/summary/all_samples.summary.tsv.gz",
     params:
         out_dir              = "results/summary",
+        abundance_only_min_within_genus_ra = config.get("abundance_only_min_within_genus_ra", 0.1),
         hit_max_damage_pvalue   = config["hit_max_damage_pvalue"],
         hit_max_damage_rate     = config.get("hit_max_damage_rate", 0.4),
         hit_min_evenness        = config["hit_min_evenness"],
@@ -542,6 +543,7 @@ rule aggregate_all:
             --coverage       {input.coverage:q} \
             --damage-model   {input.damage_model:q} \
             --out-dir    {params.out_dir:q} \
+            --abundance-only-min-within-genus-ra {params.abundance_only_min_within_genus_ra} \
             --hit-max-damage-pvalue   {params.hit_max_damage_pvalue} \
             --hit-max-damage-rate     {params.hit_max_damage_rate} \
             --hit-min-evenness        {params.hit_min_evenness} \
