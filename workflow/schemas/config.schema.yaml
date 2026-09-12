@@ -127,6 +127,29 @@ properties:
     minimum: 1
     default: 70
 
+  # Per-stratum plateau estimates and the short-read discrepancy flag.
+  damage_stratum_min_reads:
+    type: integer
+    minimum: 1
+    default: 70
+    description: >-
+      Minimum reads in a read-length stratum before the plateau damage estimate
+      is computed independently within that stratum.
+  damage_strata_flag_ratio:
+    type: number
+    minimum: 1
+    default: 2.0
+    description: >-
+      Flag short_suppressed when the longest stratum's damage_score is at least
+      this multiple of the shortest stratum's.
+  damage_strata_flag_min_delta:
+    type: number
+    minimum: 0
+    default: 0.01
+    description: >-
+      Noise floor: minimum absolute damage_score difference between strata
+      before a discrepancy is flagged.
+
   # --- plotting ---
   damage_plot_required_hit_flags:
     type: array

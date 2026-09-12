@@ -311,6 +311,9 @@ rule aggregate_sample:
         adaptive_flag          = "--adaptive-plateau" if config["damage_adaptive_plateau"] else "--no-adaptive-plateau",
         model_flag             = "--fit-damage-model" if config.get("damage_fit_model", True) else "--no-fit-damage-model",
         model_min_stratum      = config.get("damage_model_min_stratum_reads", 70),
+        stratum_min_reads      = config.get("damage_stratum_min_reads", 70),
+        strata_flag_ratio      = config.get("damage_strata_flag_ratio", 2.0),
+        strata_flag_min_delta  = config.get("damage_strata_flag_min_delta", 0.01),
     resources:
         mem_mb   = config["resources"]["aggregate_sample"]["mem_mb"],
         runtime  = config["resources"]["aggregate_sample"]["runtime"],
@@ -334,6 +337,9 @@ rule aggregate_sample:
             --plateau-noise-factor {params.plateau_noise_factor} \
             {params.model_flag:q} \
             --damage-model-min-stratum-reads {params.model_min_stratum} \
+            --stratum-min-reads {params.stratum_min_reads} \
+            --strata-flag-ratio {params.strata_flag_ratio} \
+            --strata-flag-min-delta {params.strata_flag_min_delta} \
             > {log:q} 2>&1
         """
 

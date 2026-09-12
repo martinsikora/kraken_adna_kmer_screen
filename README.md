@@ -531,6 +531,8 @@ The integrated summary table and per-sample damage PDFs are built by the default
 | `damage_score` | Fraction of unclassified terminal k-mers above plateau (5′ end) |
 | `damage_pvalue` | One-sided p-value for damage excess above plateau |
 | `plateau_classified_rate` | Baseline k-mer classified rate (1 − plateau_frac_unclassified) |
+| `damage_score_strat_lo` / `_hi` | The same plateau estimate recomputed within the shortest / longest read-length stratum that has at least `damage_stratum_min_reads` reads |
+| `damage_strata_flag` | How those two agree — see below |
 | `evenness_index` | Lander-Waterman evenness (1 = Poisson-uniform, <1 = clumped) |
 | `cov` | Breadth of k-mer coverage (fraction of genome represented) |
 | `dup` | Mean k-mer depth (total k-mers / unique k-mers) |
@@ -539,6 +541,42 @@ The integrated summary table and per-sample damage PDFs are built by the default
 | `hit_criteria_flag` | Semicolon-delimited passing criteria tokens from: `damage_rate`, `evenness_index`, `within_genus_relative_abundance`, `classified_rate` |
 
 `damage_rate` combines two tests: `damage_pvalue < hit_max_damage_pvalue` **and**
+
+### Read-length strata and the short-read blind spot
+
+The pooled plateau estimator sums every read between `damage_min_read_length`
+and `damage_max_read_length`. For libraries dominated by short molecules that
+is a problem. With k=29 a 35 bp read carries only 7 k-mers, so the plateau
+search window (`damage_plateau_search_start`..`_end`, default 3–9) lands where
+the *opposite* terminus has already entered the k-mer window. The "undamaged
+baseline" is then itself damaged, and `damage_score = pos0 − plateau` collapses
+toward zero or goes negative for genuinely damaged taxa.
+
+The effect is large. In one Pleistocene sample whose reads are 81% under 45 bp,
+*Tannerella forsythia* scores −0.0028 (p = 1.0) pooled but +0.0324 (p = 0) in
+the 56–75 bin; *Morganella morganii* in an unrelated sample scores 0.008 short
+against 0.090 long. Mapping-validated taxa are missed by the pooled statistic
+alone.
+
+`damage_stats.tsv` and `damage_global.tsv` therefore also carry the estimate
+recomputed within the shortest and longest qualifying stratum, plus
+`damage_strata_flag`:
+
+| flag | meaning |
+| --- | --- |
+| `ok` | the bins agree |
+| `short_suppressed` | both positive, long ≥ `damage_strata_flag_ratio` × short. The pooled `damage_score` is a **floor**, not an estimate |
+| `sign_disagreement` | the bins disagree in direction by more than `damage_strata_flag_min_delta`. Do not trust the pooled value |
+| `pooled_only` | neither bin significant alone, pooled is. Usually legitimate — the bins agree and pooling restores the power lost by splitting |
+| `pooled_only_discordant` | the same but the bins point opposite ways — the shape of a signal manufactured by pooling |
+| `single_stratum` / `no_strata` | too few reads per bin to compare |
+
+**These annotate; no hit criterion reads them.** Pooling is not simply inferior:
+10–20% of damage-passing taxa pass only under pooling, and most of those are
+legitimate — either below `damage_min_reads` in every individual bin, or weak
+signals that agree in direction across bins. Splitting the data would lose them.
+Use the flag to decide how much weight a pooled `damage_score` deserves.
+
 `damage_rate_5prime <= hit_max_damage_rate` (default 0.4). Deamination in a
 single-stranded overhang saturates near 0.5 per base, so a higher fitted rate is
 not a damage profile but a taxon whose reads mismatch the reference throughout,

@@ -85,6 +85,15 @@ def parse_args() -> argparse.Namespace:
                              "the k-mer window across read-length strata")
     parser.add_argument("--no-fit-damage-model", action="store_false",
                         dest="fit_damage_model")
+    parser.add_argument("--stratum-min-reads", type=int, default=70,
+                        help="Minimum reads in a read-length stratum for an "
+                             "independent plateau estimate in that stratum")
+    parser.add_argument("--strata-flag-ratio", type=float, default=2.0,
+                        help="Flag short_suppressed when the longest stratum's "
+                             "damage_score is at least this multiple of the shortest")
+    parser.add_argument("--strata-flag-min-delta", type=float, default=0.01,
+                        help="Minimum absolute damage_score difference before a "
+                             "strata discrepancy is flagged (noise floor)")
     parser.add_argument("--damage-model-min-stratum-reads", type=int, default=70,
                         help="Strata with fewer reads than this do not contribute "
                              "to the model fit")
@@ -216,6 +225,9 @@ def main() -> None:
         plateau_search_end    = args.plateau_search_end,
         min_plateau_window    = args.min_plateau_window,
         plateau_noise_factor  = args.plateau_noise_factor,
+        stratum_min_reads     = args.stratum_min_reads,
+        strata_flag_ratio     = args.strata_flag_ratio,
+        strata_flag_min_delta = args.strata_flag_min_delta,
     )
     profile_df       = merged_damage.to_dataframe(min_reads=args.min_reads)
     stratified_df    = merged_damage.to_dataframe_stratified(min_reads=args.min_reads)

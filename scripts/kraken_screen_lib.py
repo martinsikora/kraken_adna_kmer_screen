@@ -993,6 +993,91 @@ def _score_with_uncertainty(
     return {"score": score, "se": se, "ci_lo": ci_lo, "ci_hi": ci_hi, "pvalue": pvalue}
 
 
+# ---------------------------------------------------------------------------
+# Per-stratum plateau estimates and the short-read discrepancy flag
+# ---------------------------------------------------------------------------
+# The pooled plateau estimator sums every read in the damage window. For a
+# library dominated by short molecules that is a problem: with k=29, a 35 bp
+# read carries only 7 k-mers, so the plateau search window (positions 3-9)
+# lands on the rising limb where the *opposite* terminus has entered the k-mer
+# window. The "baseline" is then itself damaged and pos0 - plateau collapses
+# toward zero, or goes negative, for genuinely damaged taxa.
+#
+# The strata already carry the information needed to see this, so the plateau
+# estimate is additionally computed for the shortest and longest qualifying
+# stratum and the two are compared. Nothing about the pooled statistic changes:
+# these are annotations, because pooling legitimately recovers taxa that no
+# single stratum can (taxa below min_reads in every bin, and weak signals that
+# agree across bins), and dropping it would lose them.
+
+STRATA_FLAG_OK          = "ok"
+STRATA_FLAG_SHORT_SUPPR = "short_suppressed"
+STRATA_FLAG_SIGN        = "sign_disagreement"
+STRATA_FLAG_POOLED      = "pooled_only"
+STRATA_FLAG_POOLED_DISC = "pooled_only_discordant"
+STRATA_FLAG_SINGLE      = "single_stratum"
+STRATA_FLAG_NONE        = "no_strata"
+
+
+def _plateau_for_array(arr, search_start, search_end, min_window, noise_factor):
+    """Plateau score/pvalue for one (max_pos, 2) count array."""
+    tot = arr[:, 0].astype(float)
+    frac = np.where(tot > 0, arr[:, 1].astype(float) / np.where(tot > 0, tot, 1), np.nan)
+    ps, pe, _, _, _ = find_adaptive_plateau(
+        frac, arr[:, 0], arr[:, 1],
+        search_start=search_start, search_end=search_end,
+        min_window=min_window, noise_factor=noise_factor,
+    )
+    st = _score_with_uncertainty(arr, ps, pe)
+    return st["score"], st["pvalue"]
+
+
+def classify_strata_discrepancy(score_lo, score_hi, n_strata_used,
+                                pvalue_lo=np.nan, pvalue_hi=np.nan,
+                                pooled_pvalue=np.nan,
+                                ratio: float = 2.0, min_delta: float = 0.01,
+                                alpha: float = 0.05) -> str:
+    """
+    Compare the shortest and longest qualifying read-length stratum.
+
+    sign_disagreement — the bins disagree in direction by more than noise, so
+        the pooled value averages a suppressed (or absent) signal with a real
+        one and should not be trusted.
+    short_suppressed — both bins positive but the long bin is at least `ratio`
+        times the short one. The short bin is biased toward zero rather than
+        merely noisier, so the pooled damage_score is a floor, not an estimate.
+    pooled_only — neither bin is significant on its own but the pooled test is.
+        Usually legitimate: the bins agree in direction and pooling recovers
+        the power lost by splitting. Reported so the dependence is visible.
+    pooled_only_discordant — the same, but the bins point in opposite
+        directions. This is the shape of a signal manufactured by pooling: in
+        the validation set Yana_old's E. coli scores -0.0041 (short, p=0.85)
+        and +0.0012 (long, p=0.26) yet pools to p=0.005 on 80k reads, for an
+        organism independently shown to be ~90% modern contamination. Too
+        small to trip the min_delta sign test, so it needs its own rule.
+    """
+    if n_strata_used == 0:
+        return STRATA_FLAG_NONE
+    if n_strata_used == 1:
+        return STRATA_FLAG_SINGLE
+    if not (np.isfinite(score_lo) and np.isfinite(score_hi)):
+        return STRATA_FLAG_SINGLE
+
+    discordant = (score_lo < 0) != (score_hi < 0)
+    if discordant and max(abs(score_lo), abs(score_hi)) >= min_delta:
+        return STRATA_FLAG_SIGN
+
+    bin_sig = ((np.isfinite(pvalue_lo) and pvalue_lo < alpha) or
+               (np.isfinite(pvalue_hi) and pvalue_hi < alpha))
+    if np.isfinite(pooled_pvalue) and pooled_pvalue < alpha and not bin_sig:
+        return STRATA_FLAG_POOLED_DISC if discordant else STRATA_FLAG_POOLED
+
+    if score_hi > 0 and score_lo >= 0 and (score_hi - score_lo) >= min_delta \
+            and score_hi >= ratio * max(score_lo, 1e-12):
+        return STRATA_FLAG_SHORT_SUPPR
+    return STRATA_FLAG_OK
+
+
 def compute_damage_stats(
     acc: DamageAccumulator,
     min_reads: int = 100,
@@ -1003,6 +1088,9 @@ def compute_damage_stats(
     plateau_search_end: int = 10,
     min_plateau_window: int = 3,
     plateau_noise_factor: float = 2.0,
+    stratum_min_reads: int = 70,
+    strata_flag_ratio: float = 2.0,
+    strata_flag_min_delta: float = 0.01,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Returns:
@@ -1019,6 +1107,16 @@ def compute_damage_stats(
         arr5, arr3 = acc.raw(key)
         n_reads  = acc.n_reads(key)
         end_data: dict = {}
+
+        # Shortest / longest read-length stratum with enough reads to estimate
+        # a plateau independently. acc.strata is ordered by read length, so
+        # index order is length order.
+        strat = acc.raw_stratified(key)
+        sn = acc._sn.get(key) if strat is not None else None
+        qual = ([i for i in range(len(acc.strata)) if int(sn[i]) >= stratum_min_reads]
+                if strat is not None and sn is not None else [])
+        si_lo, si_hi = (qual[0], qual[-1]) if qual else (None, None)
+        strat_label = lambda i: f"{acc.strata[i][0]}-{acc.strata[i][1]}"
 
         for end, frac, arr in [("5prime", f5, arr5), ("3prime", f3, arr3)]:
             if adaptive_plateau:
@@ -1039,6 +1137,30 @@ def compute_damage_stats(
                 plateau_val = k_plat / n_plat if n_plat > 0 else np.nan
 
             stats = _score_with_uncertainty(arr, ps, pe)
+
+            # Same estimator, restricted to one stratum at a time.
+            s_idx = 0 if end == "5prime" else 1
+            sc_lo = pv_lo = sc_hi = pv_hi = np.nan
+            n_lo = n_hi = 0
+            lab_lo = lab_hi = ""
+            if si_lo is not None:
+                sc_lo, pv_lo = _plateau_for_array(
+                    strat[s_idx][si_lo], plateau_search_start, plateau_search_end,
+                    min_plateau_window, plateau_noise_factor)
+                n_lo, lab_lo = int(sn[si_lo]), strat_label(si_lo)
+            if si_hi is not None and si_hi != si_lo:
+                sc_hi, pv_hi = _plateau_for_array(
+                    strat[s_idx][si_hi], plateau_search_start, plateau_search_end,
+                    min_plateau_window, plateau_noise_factor)
+                n_hi, lab_hi = int(sn[si_hi]), strat_label(si_hi)
+            flag = classify_strata_discrepancy(
+                sc_lo, sc_hi, len(qual),
+                pvalue_lo=pv_lo, pvalue_hi=pv_hi,
+                pooled_pvalue=stats.get("pvalue", np.nan),
+                ratio=strata_flag_ratio, min_delta=strata_flag_min_delta)
+            stats = dict(stats)
+            stats.update(strata_flag=flag, score_lo=sc_lo, score_hi=sc_hi,
+                         pvalue_hi=pv_hi)
             end_data[end] = stats
 
             pos0 = float(arr[0, 1] / arr[0, 0]) if arr[0, 0] > 0 else np.nan
@@ -1046,6 +1168,15 @@ def compute_damage_stats(
                 "taxid":                taxid,
                 "species_name":         species_name,
                 "end":                  end,
+                "damage_score_strat_lo":  sc_lo,
+                "damage_pvalue_strat_lo": pv_lo,
+                "n_reads_strat_lo":       n_lo,
+                "stratum_lo":             lab_lo,
+                "damage_score_strat_hi":  sc_hi,
+                "damage_pvalue_strat_hi": pv_hi,
+                "n_reads_strat_hi":       n_hi,
+                "stratum_hi":             lab_hi,
+                "damage_strata_flag":     flag,
                 "pos0_frac_unc":        pos0,
                 "plateau_frac_unc":     plateau_val,
                 "plateau_pos_start":    ps,
@@ -1070,16 +1201,25 @@ def compute_damage_stats(
             "damage_score_ci95_hi": s5.get("ci_hi",  np.nan),
             "damage_pvalue":        s5.get("pvalue", np.nan),
             "damage_score_3prime":  s3.get("score",  np.nan),
+            "damage_score_strat_lo":  s5.get("score_lo",  np.nan),
+            "damage_score_strat_hi":  s5.get("score_hi",  np.nan),
+            "damage_pvalue_strat_hi": s5.get("pvalue_hi", np.nan),
+            "damage_strata_flag":     s5.get("strata_flag", STRATA_FLAG_NONE),
         })
 
     stats_df  = pd.DataFrame(stat_rows) if stat_rows else pd.DataFrame(columns=[
         "taxid", "species_name", "end", "pos0_frac_unc", "plateau_frac_unc",
         "plateau_pos_start", "plateau_pos_end", "damage_score", "damage_score_se",
         "damage_score_ci95_lo", "damage_score_ci95_hi", "damage_pvalue", "n_reads",
+        "damage_score_strat_lo", "damage_pvalue_strat_lo", "n_reads_strat_lo", "stratum_lo",
+        "damage_score_strat_hi", "damage_pvalue_strat_hi", "n_reads_strat_hi", "stratum_hi",
+        "damage_strata_flag",
     ])
     global_df = pd.DataFrame(global_rows) if global_rows else pd.DataFrame(columns=[
         "taxid", "species_name", "n_reads", "damage_score", "damage_score_se",
         "damage_score_ci95_lo", "damage_score_ci95_hi", "damage_pvalue", "damage_score_3prime",
+        "damage_score_strat_lo", "damage_score_strat_hi", "damage_pvalue_strat_hi",
+        "damage_strata_flag",
     ])
     if not stats_df.empty:
         stats_df = stats_df.sort_values("damage_score", ascending=False).reset_index(drop=True)

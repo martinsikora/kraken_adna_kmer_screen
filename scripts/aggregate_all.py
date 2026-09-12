@@ -29,6 +29,12 @@ DMG_COLS = [
     "n_reads", "damage_score", "damage_score_se",
     "damage_score_ci95_lo", "damage_score_ci95_hi",
     "damage_pvalue", "damage_score_3prime",
+    # Per-stratum plateau estimates and their discrepancy flag. Written by
+    # compute_damage_stats; older per-sample files predate them and are filled
+    # with NaN / "" by _load_typed_stack, so mixed result directories still
+    # aggregate.
+    "damage_score_strat_lo", "damage_score_strat_hi", "damage_pvalue_strat_hi",
+    "damage_strata_flag",
 ]
 COV_COLS = [
     "sample_id", "tax_id", "tax_name", "rank",
@@ -65,6 +71,12 @@ SUMMARY_OUTPUT_COLS = [
     # Only damage_rate_5prime feeds a hit criterion (as an implausibility veto).
     "interior_rate", "damage_rate_5prime", "damage_rate_5prime_se",
     "damage_rate_3prime", "damage_model_pvalue_5prime",
+    # Plateau estimate re-derived within the shortest and longest read-length
+    # stratum, with a flag when they disagree. See classify_strata_discrepancy:
+    # short_suppressed means the pooled damage_score is a floor rather than an
+    # estimate, sign_disagreement means it should not be trusted at all. These
+    # annotate; no hit criterion reads them.
+    "damage_score_strat_lo", "damage_score_strat_hi", "damage_strata_flag",
     "plateau_classified_rate",
     "evenness_index", "cov", "dup", "kmers",
     "hit_criteria_flag",
