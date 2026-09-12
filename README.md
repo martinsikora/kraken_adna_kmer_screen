@@ -571,6 +571,30 @@ recomputed within the shortest and longest qualifying stratum, plus
 | `pooled_only_discordant` | the same but the bins point opposite ways — the shape of a signal manufactured by pooling |
 | `single_stratum` / `no_strata` | too few reads per bin to compare |
 
+**Read the flag conditioned on the pooled test, not across all rows.** Most
+rows in a summary are not detections, and their damage estimates are noise in
+both strata, so a discrepancy flag on them means nothing. Measured on
+allentoft_2015_nature (168 samples, 273k 5' rows):
+
+| subset | `ok` | `sign_disagreement` | `short_suppressed` |
+| --- | --- | --- | --- |
+| all 5' rows | 39% | 27% | 9% |
+| pooled damage-significant | 58% | **11%** | 13% |
+| pooled-significant, >=500 reads per bin | 71% | 12% | 17% |
+
+Among rows where the pooled test is significant — the only rows where the flag
+changes an interpretation — `sign_disagreement` sits near 11%. Those are taxa
+whose two per-bin estimates genuinely disagree: the direction splits about
+53/47 between long-positive and short-positive, so it is estimator instability
+at low per-bin read counts rather than a systematic artefact, and no threshold
+separates the two halves. Gating on the positive bin's own significance moves
+the rate only from 10.8% to 10.6%, which is why the default `min_delta` of 0.01
+is left alone.
+
+`short_suppressed` behaves differently and rises with row quality (9% -> 17%),
+because it needs enough reads in both bins to establish the ratio. That is the
+flag to act on.
+
 **These annotate; no hit criterion reads them.** Pooling is not simply inferior:
 10–20% of damage-passing taxa pass only under pooling, and most of those are
 legitimate — either below `damage_min_reads` in every individual bin, or weak
