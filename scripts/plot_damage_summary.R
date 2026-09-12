@@ -183,6 +183,28 @@ df$shape <- ifelse(df$significant, 25L, 21L)
 
 size_breaks <- c(100, 1e3, 1e4, 1e5)
 
+# ggplot2 drops breaks that fall outside the data range but keeps the literal
+# `labels` vector, so any sample whose taxa do not span these fixed breaks --
+# in the limit a single-taxon sample, where the range collapses to a point --
+# aborts with "`breaks` and `labels` have different lengths". Subset breaks and
+# labels together, and fall back to ggplot's own breaks when fewer than two
+# survive.
+.rng <- range(df$log10_n, na.rm = TRUE)
+size_breaks <- size_breaks[size_breaks >= 10^.rng[1] & size_breaks <= 10^.rng[2]]
+
+size_scale <- if (length(size_breaks) >= 2L) {
+  scale_size_continuous(
+    name = "reads", range = c(0.6, 7),
+    breaks = log10(size_breaks),
+    labels = scales::comma(size_breaks)
+  )
+} else {
+  scale_size_continuous(
+    name = "reads", range = c(0.6, 7),
+    labels = function(v) scales::comma(round(10^v))
+  )
+}
+
 p <- ggplot(df, aes(x = .data$x, y = .data$y)) +
   geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60",
              linewidth = 0.3) +
@@ -203,12 +225,7 @@ p <- ggplot(df, aes(x = .data$x, y = .data$y)) +
     values = c(`TRUE` = "black", `FALSE` = "transparent"),
     na.value = "transparent", guide = "none"
   ) +
-  scale_size_continuous(
-    name = "reads",
-    range = c(0.6, 7),
-    breaks = log10(size_breaks),
-    labels = scales::comma(size_breaks)
-  ) +
+  size_scale +
   labs(
     x = "Baseline classified k-mer rate  (1 − plateau unclassified)",
     y = "Damage rate (%)",
